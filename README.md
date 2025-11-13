@@ -8,12 +8,48 @@ En esta fase de desarrollo (v0.1), la aplicación se centra en la estabilidad, l
 
 ---
 
-## 🚀 Características Clave (v0.1 Pre-Release)
+🚀 Funcionalidades Clave de VisageVault (v0.1 Pre-Release)
 
-* **Organización Automática por Año:** Las fotografías se agrupan automáticamente por año utilizando una jerarquía robusta (EXIF > Nombre de Archivo > Fecha de Modificación).
-* **Actualización Persistente de Años:** El año de una fotografía es editable directamente en el visor de detalles y se guarda en una base de datos local (`SQLite`), asegurando que la foto se mueva a la agrupación correcta en la interfaz.
-* **Visor de Detalles Avanzado:** Ventana modal con `QSplitter` vertical, permitiendo la visualización de la imagen a tamaño completo con **zoom por rueda del ratón** y la edición rápida de metadatos.
-* **Experiencia Fluida:** Interfaz gráfica basada en **PySide6 (Qt)** con **precarga asíncrona** de miniaturas y gestión de hilos para evitar que la interfaz se congele durante el escaneo de directorios.
+La aplicación ya no es solo un prototipo, sino una herramienta funcional con gestión avanzada de datos.
+
+1. Gestión de Datos y Persistencia (Backend)
+
+    Persistencia de Datos (SQLite): Utiliza una base de datos local (visagevault.db) como fuente principal de verdad para el año y mes de cada fotografía, garantizando que las ediciones sean permanentes.
+
+    Seguridad Multihilo: La clase VisageVaultDB gestiona las conexiones de SQLite de forma segura (_get_connection), eliminando los errores de RuntimeError al acceder a la base de datos desde el hilo de escaneo.
+
+    Escaneo Inteligente: El PhotoFinderWorker solo calcula la fecha de la foto (EXIF/Modificación) para los archivos nuevos; para los archivos existentes, carga la fecha desde la BD, optimizando drásticamente los tiempos de escaneo.
+
+    Detección de Archivos: Escaneo recursivo de directorios para encontrar archivos con extensiones de imagen comunes (.jpg, .png, etc.).
+
+2. Interfaz de Usuario y Experiencia (Frontend)
+
+    Organización Avanzada: Agrupación dinámica de las fotos en la vista principal por Año y Mes (ej. "2025" -> "Noviembre").
+
+    Navegación Jerárquica: Índice lateral navegable (usando QTreeWidget) que permite saltar instantáneamente a un año o mes específico.
+
+    Visualización Fluida: Implementación de precarga asíncrona de miniaturas (ThumbnailLoader) que asegura que el scroll sea suave y que la interfaz de usuario nunca se congele durante la carga de imágenes.
+
+    Gestión de Espacio: El divisor (QSplitter) permite al usuario ajustar el tamaño de la cuadrícula de fotos y la barra lateral de navegación a su gusto.
+
+3. Visor de Detalles y Edición
+
+    Edición Persistente de Fecha: El diálogo de detalles permite modificar el Año y el Mes mediante campos dedicados. Estos cambios se guardan en la BD y fuerzan la reubicación de la foto en la cuadrícula principal.
+
+    Zoom Interactivo: El ZoomableClickableLabel permite hacer zoom in/out con la rueda del ratón en la foto a tamaño completo.
+
+    Actualización Instantánea: Al guardar una fecha, la señal metadata_changed dispara la reconstrucción de la vista principal, moviendo la foto a su nueva ubicación sin necesidad de escanear el disco de nuevo.
+
+    Visualización de Metadatos: Muestra todos los metadatos EXIF disponibles en un formato de tabla.
+
+📘 Módulos Clave Implementados
+
+Módulo	                 Función Principal
+visagevault.py	         Controla la GUI (VisageVaultApp), gestiona hilos y coordina la actualización del modelo de datos.
+db_manager.py	         Gestiona la base de datos SQLite, asegura la integridad de los datos (year, month, filepath) y maneja conexiones seguras entre hilos.
+photo_finder.py	         Escaneo recursivo de archivos en el disco duro.
+metadata_reader.py	     Calcula el año/mes inicial de una foto (usando EXIF o fecha de modificación) y gestiona la lectura/escritura de metadatos EXIF.
+thumbnail_generator.py	 Crea y gestiona la caché local de miniaturas.
 
 ---
 
