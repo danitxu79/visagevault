@@ -1,38 +1,53 @@
 # metadata_reader.py
 import piexif
+import re
 from PIL import Image
 from PIL.ExifTags import TAGS
 from datetime import datetime
 from pathlib import Path
 
-def get_photo_date(filepath: str) -> tuple[str, str] | None:
+def get_photo_date(filepath: str) -> tuple[str, str]:
     """
-    Lee la fecha de creación de una foto a partir de los metadatos EXIF.
-    Devuelve una tupla (año, mes) o None.
-    El mes es un string de dos dígitos (ej: "08").
+    Determina la fecha de una foto con la siguiente prioridad:
+    1. Patrón en el nombre del archivo (ej: IMG-20250402-...).
+    2. Metadatos EXIF ('DateTimeOriginal' o 'DateTime').
+    3. Fecha de modificación del archivo.
+    Devuelve una tupla (año, mes) o ("Sin Fecha", "00").
     """
+    filename = Path(filepath).name
+
+    # 1. Buscar patrón en el nombre del archivo
+    match = re.search(r'IMG-(\d{8})', filename)
+    if match:
+        date_str = match.group(1)
+        try:
+            # '20250402' -> datetime object
+            dt = datetime.strptime(date_str, '%Y%m%d')
+            return str(dt.year), f"{dt.month:02d}"
+        except ValueError:
+            # El patrón existe pero la fecha no es válida, pasamos al siguiente método
+            pass
+
+    # 2. Si no hay patrón en el nombre, leer metadatos EXIF
     try:
         img = Image.open(filepath)
         exif_data = img.getexif()
 
         if exif_data:
-            # Buscar el campo "DateTimeOriginal" (código 36867) o "DateTime" (código 306)
             for tag_id, value in exif_data.items():
                 if TAGS.get(tag_id) in ['DateTimeOriginal', 'DateTime']:
-                    # El formato EXIF es 'YYYY:MM:DD HH:MM:SS'
                     try:
                         dt = datetime.strptime(value, '%Y:%m:%d %H:%M:%S')
                         return str(dt.year), f"{dt.month:02d}"
-                    except ValueError:
-                        pass # Si el formato es incorrecto, seguimos buscando
+                    except (ValueError, TypeError):
+                        pass
 
-        # Si no hay EXIF o no encontramos la fecha, usamos la fecha de modificación del archivo
+        # 3. Si no hay EXIF, usar fecha de modificación
         stat = Path(filepath).stat()
         dt_mod = datetime.fromtimestamp(stat.st_mtime)
         return str(dt_mod.year), f"{dt_mod.month:02d}"
 
     except Exception:
-        # Puede fallar si no es un formato de imagen válido o el archivo está corrupto
         return "Sin Fecha", "00"
 
 def get_exif_dict(filepath: str) -> dict:

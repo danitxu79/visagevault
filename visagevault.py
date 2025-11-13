@@ -1,6 +1,6 @@
 # ==============================================================================
 # PROYECTO: VisageVault - Gestor de Fotografías Inteligente
-# VERSIÓN: 0.1 pre-release
+# VERSIÓN: 0.2 pre-release
 # DERECHOS DE AUTOR: © 2025 Daniel Serrano Armenta
 # ==============================================================================
 #
@@ -58,9 +58,10 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import (
     Qt, QSize, QObject, Signal, QThread, Slot, QTimer,
-    QRunnable, QThreadPool, QPropertyAnimation, QEasingCurve, QRect, QPoint
+    QRunnable, QThreadPool, QPropertyAnimation, QEasingCurve, QRect, QPoint, QRectF,
+    QPointF
 )
-from PySide6.QtGui import QPixmap, QIcon, QCursor
+from PySide6.QtGui import QPixmap, QIcon, QCursor, QTransform, QPainter, QPaintEvent
 
 # --- Importamos módulos auxiliares (ASUMIDOS EXISTENTES) ---
 from photo_finder import find_photos
@@ -121,24 +122,23 @@ class ThumbnailLoader(QRunnable):
 # =================================================================
 class ImagePreviewDialog(QDialog):
     """
-    Un QDialog sin marco que muestra una imagen a pantalla completa con una
-    animación de escalado al abrir y cerrar.
+    Un QDialog sin marco que usa ZoomableClickableLabel para mostrar una
+    imagen con zoom y animación.
     """
-    # Flag estático para evitar que se abra más de una instancia a la vez
     is_showing = False
 
     def __init__(self, pixmap: QPixmap, parent=None):
         super().__init__(parent)
-        
-        ImagePreviewDialog.is_showing = True # Marcamos que una instancia está activa
+
+        ImagePreviewDialog.is_showing = True
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_DeleteOnClose)
 
-        self._pixmap = pixmap # Guardamos el pixmap original
-        self.label = QLabel(self)
-        # self.label.setScaledContents(True) # ➤️ QUITAMOS ESTO
+        self._pixmap = pixmap
+
+        self.label = ZoomableClickableLabel(self)
+        self.label.is_thumbnail_view = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -146,55 +146,36 @@ class ImagePreviewDialog(QDialog):
 
         self.animation = QPropertyAnimation(self, b"geometry")
 
-    def wheelEvent(self, event):
-        """Si el usuario gira la rueda hacia arriba y pulsa CTRL, cierra la ventana."""
-        if event.modifiers() == Qt.ControlModifier and event.angleDelta().y() > 0:
-            self.close_with_animation()
-
     def show_with_animation(self):
-        """
-        Muestra la ventana con una animación de zoom desde el cursor.
-        La imagen se pre-escala para asegurar que quepa en pantalla.
-        """
-        start_pos = QCursor.pos()
-
-        # 1. Determinar la pantalla correcta
-        screen = QApplication.screenAt(start_pos)
+        """Muestra la ventana centrada (temporalmente sin animación para debug)."""
+        screen = QApplication.screenAt(QCursor.pos())
         if not screen:
             screen = QApplication.primaryScreen()
-        
+
         screen_geom = screen.availableGeometry()
         img_size = self._pixmap.size()
 
-        # 2. Calcular el tamaño final
+        max_width = int(screen_geom.width() * 0.9)
+        max_height = int(screen_geom.height() * 0.9)
+
         target_size = img_size
-        if (img_size.width() > screen_geom.width() * 0.9 or
-            img_size.height() > screen_geom.height() * 0.9):
-            target_size = img_size.scaled(
-                screen_geom.size() * 0.9, Qt.KeepAspectRatio
-            )
+        if img_size.width() > max_width or img_size.height() > max_height:
+            target_size = img_size.scaled(max_width, max_height, Qt.KeepAspectRatio)
 
-        # 3. Pre-escalar el pixmap y asignarlo al label
-        scaled_pixmap = self._pixmap.scaled(
-            target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        self.label.setPixmap(scaled_pixmap);
+        self.label.setOriginalPixmap(self._pixmap)
 
-        # 4. Calcular la geometría final
-        end_geom = QRect(QPoint(0, 0), target_size)
-        end_geom.moveCenter(screen_geom.center())
+        # Establecer el tamaño de la ventana
+        self.resize(target_size)
 
-        # 5. Configurar y ejecutar la animación
-        start_geom = QRect(start_pos.x(), start_pos.y(), 1, 1)
-        self.setGeometry(start_geom)
-        
-        self.animation.setDuration(200)
-        self.animation.setStartValue(start_geom)
-        self.animation.setEndValue(end_geom)
-        self.animation.setEasingCurve(QEasingCurve.OutQuad)
-        
+        # Calcular posición centrada
+        center_x = screen_geom.x() + (screen_geom.width() - target_size.width()) // 2
+        center_y = screen_geom.y() + (screen_geom.height() - target_size.height()) // 2
+
+        # Mover la ventana a la posición centrada
+        self.move(center_x, center_y)
+
+
         self.show()
-        self.animation.start()
 
     def close_with_animation(self):
         """Cierra la ventana con una animación de zoom hacia el cursor."""
@@ -206,131 +187,376 @@ class ImagePreviewDialog(QDialog):
         self.animation.setStartValue(start_geom)
         self.animation.setEndValue(end_geom)
         self.animation.setEasingCurve(QEasingCurve.InQuad)
-        
+
         self.animation.finished.connect(self._handle_close_animation_finished)
         self.animation.start()
 
     def _handle_close_animation_finished(self):
-        """
-        Este slot se ejecuta cuando la animación de cierre ha terminado.
-        Resetea el flag y cierra el diálogo.
-        """
+        """Resetea el flag y cierra el diálogo."""
         ImagePreviewDialog.is_showing = False
         self.accept()
 
+    def resizeEvent(self, event):
+        """Reescala el pixmap para que se ajuste si no estamos zoomeados."""
+        if self.label._current_scale == 1.0:
+            self.label.fitToWindow()
+        super().resizeEvent(event)
 
-# -----------------------------------------------------------------
-# NUEVA CLASE: ZoomableClickableLabel (Combina Zoom y Doble Clic)
-# -----------------------------------------------------------------
+
+# =================================================================
+# MÉTODO fitToWindow CORREGIDO para ZoomableClickableLabel
+# =================================================================
+# Este método debe reemplazar el existente en la clase ZoomableClickableLabel
+
+def fitToWindow(self):
+    """Ajusta la imagen para que quepa en el label (resetea el zoom)."""
+    if self._original_pixmap.isNull():
+        self.setPixmap(QPixmap())
+        return
+
+    # Calcular la escala que cabe en la ventana
+    scale_x = self.width() / self._original_pixmap.width() if self._original_pixmap.width() > 0 else 1.0
+    scale_y = self.height() / self._original_pixmap.height() if self._original_pixmap.height() > 0 else 1.0
+
+    # Usar la escala más pequeña para mantener el aspect ratio
+    self._current_scale = min(scale_x, scale_y)
+
+    # Calcular offset para centrar la imagen
+    scaled_width = self._original_pixmap.width() * self._current_scale
+    scaled_height = self._original_pixmap.height() * self._current_scale
+
+    # Si la imagen escalada es más pequeña que la ventana, calcular offset para centrarla
+    offset_x = 0.0
+    offset_y = 0.0
+
+    if scaled_width < self.width():
+        # Centrar horizontalmente (offset negativo en coordenadas de imagen)
+        offset_x = -(self.width() - scaled_width) / (2.0 * self._current_scale)
+
+    if scaled_height < self.height():
+        # Centrar verticalmente (offset negativo en coordenadas de imagen)
+        offset_y = -(self.height() - scaled_height) / (2.0 * self._current_scale)
+
+    self._view_offset = QPointF(offset_x, offset_y)
+
+    self.update() # Repintar
+
+def show_with_animation(self):
+    """
+    Muestra la ventana con una animación de zoom desde el cursor.
+    """
+    start_pos = QCursor.pos()
+    screen = QApplication.screenAt(start_pos)
+    if not screen:
+        screen = QApplication.primaryScreen()
+
+    screen_geom = screen.availableGeometry()
+    img_size = self._pixmap.size()
+
+    # Calcular el tamaño final (asegurando que sean enteros)
+    max_width = int(screen_geom.width() * 0.9)
+    max_height = int(screen_geom.height() * 0.9)
+
+    target_size = img_size
+    if img_size.width() > max_width or img_size.height() > max_height:
+        target_size = img_size.scaled(max_width, max_height, Qt.KeepAspectRatio)
+
+    # Pasar el pixmap original al label de zoom
+    self.label.setOriginalPixmap(self._pixmap)
+
+    # Calcular posición centrada manualmente
+    center_x = screen_geom.x() + (screen_geom.width() - target_size.width()) // 2
+    center_y = screen_geom.y() + (screen_geom.height() - target_size.height()) // 2
+
+    end_geom = QRect(center_x, center_y, target_size.width(), target_size.height())
+    start_geom = QRect(start_pos.x(), start_pos.y(), 1, 1)
+
+    # Configurar animación de geometría
+    self.animation.setDuration(300)
+    self.animation.setStartValue(start_geom)
+    self.animation.setEndValue(end_geom)
+    self.animation.setEasingCurve(QEasingCurve.OutQuad)
+
+    # Mostrar la ventana y animar
+    self.show()
+    self.animation.start()
+
+    def close_with_animation(self):
+        """Cierra la ventana con una animación de zoom hacia el cursor."""
+        end_pos = QCursor.pos()
+        end_geom = QRect(end_pos.x(), end_pos.y(), 1, 1)
+        start_geom = self.geometry()
+
+        self.animation.setDuration(200)
+        self.animation.setStartValue(start_geom)
+        self.animation.setEndValue(end_geom)
+        self.animation.setEasingCurve(QEasingCurve.InQuad)
+
+        self.animation_opacity.setDuration(150)
+        self.animation_opacity.setStartValue(1.0)
+        self.animation_opacity.setEndValue(0.0)
+
+        self.animation.finished.connect(self._handle_close_animation_finished)
+        self.animation.start()
+        self.animation_opacity.start()
+
+    def _handle_close_animation_finished(self):
+        """Resetea el flag y cierra el diálogo."""
+        ImagePreviewDialog.is_showing = False
+        self.accept()
+
+    def resizeEvent(self, event):
+        """Reescala el pixmap para que se ajuste si no estamos zoomeados."""
+        if self.label._current_scale == 1.0:
+            self.label.fitToWindow()
+        super().resizeEvent(event)
+
+# =================================================================
+# CLASE: ZoomableClickableLabel (CON ZOOM AL PUNTERO)
+# =================================================================
 class ZoomableClickableLabel(QLabel):
     """
-    Un QLabel que emite una señal de doble clic y maneja el zoom
-    con la rueda del ratón o una vista previa especial.
+    Un QLabel que emite una señal de doble clic, maneja la vista previa
+    (Ctrl+Rueda) y permite un zoom dinámico al puntero y arrastre (panning)
+    en la vista de detalle.
     """
-    # Señal para el doble clic (para la vista de miniaturas)
     doubleClickedPath = Signal(str)
 
     def __init__(self, original_path=None, parent=None):
         super().__init__(parent)
         self.original_path = original_path
         self.setAlignment(Qt.AlignCenter)
+        self.setMouseTracking(True)
 
-        # Atributos para el Zoom
+        # --- Atributos de Zoom y Panning ---
         self._original_pixmap = QPixmap()
         self._current_scale = 1.0
-        self.setMinimumSize(1, 1) # Importante para el zoom
-
-        # NUEVO: Atributo para diferenciar el modo de vista
-        self.is_thumbnail_view = False
+        self._scale_factor = 1.15
+        self._view_offset = QPointF(0.0, 0.0)
+        self._panning = False
+        self._last_mouse_pos = QPoint()
+        self.is_thumbnail_view = False # Por defecto, NO es miniatura
+        self.setCursor(Qt.OpenHandCursor)
 
     def setOriginalPixmap(self, pixmap: QPixmap):
-        """Establece la imagen base (alta resolución) para el zoom."""
-        self._original_pixmap = pixmap
-        self.fitToWindow() # Ajuste inicial
+        """Establece la imagen original y reinicia el zoom."""
+        if pixmap.isNull():
+            self._original_pixmap = QPixmap()
+        else:
+            self._original_pixmap = pixmap
+
+        self._current_scale = 1.0
+        self._view_offset = QPointF(0.0, 0.0)
+        self.fitToWindow()
 
     def fitToWindow(self):
-        """Ajusta la imagen al tamaño actual del label (resetea el zoom)."""
+        """Ajusta la imagen para que quepa en el label (resetea el zoom)."""
         if self._original_pixmap.isNull():
+            self.setPixmap(QPixmap())
             return
-        self._current_scale = 1.0
-        self.setPixmap(self._original_pixmap.scaled(
-            self.size(),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
-        ))
+
+        scaled_pixmap = self._original_pixmap.scaled(
+            self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+
+        if self._original_pixmap.width() > 0:
+            self._current_scale = scaled_pixmap.width() / self._original_pixmap.width()
+        else:
+            self._current_scale = 1.0
+
+        # --- !! ESTA ES LA CORRECCIÓN !! ---
+        # En lugar de resetear el offset a (0,0), llamamos a _clamp_view_offset.
+        # _clamp_view_offset detectará que la imagen es más pequeña que
+        # la ventana y calculará el offset negativo necesario para centrarla.
+        self._clamp_view_offset()
+        # ---------------------------------
+
+        self.update() # Repintar
 
     def wheelEvent(self, event):
-        """
-        Maneja el evento de la rueda del ratón.
-        - En la vista de miniaturas:
-            - Con CTRL + Rueda Abajo: Abre la vista previa.
-            - Sin CTRL: Permite el scroll normal.
-        - En la vista de detalle: Hace zoom en la imagen.
-        """
-        # Si es una miniatura...
-        if self.is_thumbnail_view:
-            # Si se pulsa CTRL y la rueda es hacia abajo, abrimos el preview.
-            if event.modifiers() == Qt.ControlModifier and event.angleDelta().y() < 0:
-                self._open_preview()
-            else:
-                # Si no, pasamos el evento al padre (el QScrollArea) para que haga scroll.
-                super().wheelEvent(event)
-            return  # Importante: no continuar al código de zoom de abajo.
+        """Gestiona el zoom con la rueda del ratón."""
 
-        # Si no, es la vista de detalle, y se aplica el zoom (sin CTRL)
+        # --- LÓGICA DE CIERRE/APERTURA (CON CTRL) ---
+        if event.modifiers() == Qt.ControlModifier:
+            if self.is_thumbnail_view:
+                # Si es miniatura, Ctrl+Rueda Abajo abre la vista previa
+                if event.angleDelta().y() < 0:
+                    self._open_preview()
+                else:
+                    super().wheelEvent(event) # Pasa al ScrollArea
+            else:
+                # Si NO es miniatura (es vista previa o detalle), Ctrl+Rueda CIERRA
+                parent_dialog = self.window()
+                if isinstance(parent_dialog, ImagePreviewDialog):
+                    parent_dialog.close_with_animation()
+            return # Evento consumido
+
+        # --- LÓGICA DE SCROLL/ZOOM (SIN CTRL) ---
+
+        # 1. Si es miniatura, pasa el evento al ScrollArea
+        if self.is_thumbnail_view:
+            super().wheelEvent(event)
+            return
+
+        # 2. Si es vista previa/detalle, hace zoom al puntero
         if self._original_pixmap.isNull():
             return
 
-        angle = event.angleDelta().y()
-        if angle > 0:
-            self._current_scale *= 1.15  # Zoom In
+        old_scale = self._current_scale
+        if event.angleDelta().y() > 0:
+            self._current_scale *= self._scale_factor
         else:
-            self._current_scale /= 1.15  # Zoom Out
+            self._current_scale /= self._scale_factor
 
-        # Limitar el zoom para que no sea demasiado pequeño
-        if self._original_pixmap.size().width() * self._current_scale < 10:
-            self._current_scale = 10 / self._original_pixmap.size().width()
+        mouse_pos_in_label = event.position()
 
-        self._updateScaledPixmap()
+        original_img_coords_before_zoom = QPointF(
+            self._view_offset.x() + (mouse_pos_in_label.x() / old_scale),
+            self._view_offset.y() + (mouse_pos_in_label.y() / old_scale)
+        )
+
+        self._view_offset = QPointF(
+            original_img_coords_before_zoom.x() - (mouse_pos_in_label.x() / self._current_scale),
+            original_img_coords_before_zoom.y() - (mouse_pos_in_label.y() / self._current_scale)
+        )
+
+        self._clamp_view_offset()
+        self.update()
+
+    def mousePressEvent(self, event):
+        """Inicia el arrastre de la imagen (panning)."""
+        if event.button() == Qt.LeftButton and not self.is_thumbnail_view:
+            self._panning = True
+            self._last_mouse_pos = event.position().toPoint()
+            self.setCursor(Qt.ClosedHandCursor)
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Mueve la imagen al arrastrar."""
+        if self._panning and not self.is_thumbnail_view:
+            delta = event.position().toPoint() - self._last_mouse_pos
+            self._view_offset -= QPointF(delta.x() / self._current_scale, delta.y() / self._current_scale)
+            self._last_mouse_pos = event.position().toPoint()
+            self._clamp_view_offset()
+            self.update()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Termina el arrastre."""
+        if event.button() == Qt.LeftButton and not self.is_thumbnail_view:
+            self._panning = False
+            self.setCursor(Qt.OpenHandCursor)
+
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        """Maneja el doble clic."""
+        if self.is_thumbnail_view and self.original_path:
+            self.doubleClickedPath.emit(self.original_path)
+
+        if not self.is_thumbnail_view:
+            self.fitToWindow() # Doble clic en detalle resetea el zoom
+
+        super().mouseDoubleClickEvent(event)
+
+    def _clamp_view_offset(self):
+        """Ajusta el offset para que la vista no se salga de la imagen."""
+        if self._original_pixmap.isNull() or self._current_scale == 0: return
+
+        scaled_img_width = self._original_pixmap.width() * self._current_scale
+        scaled_img_height = self._original_pixmap.height() * self._current_scale
+
+        # Si la imagen es más pequeña que la ventana, el offset es 0 (se centrará en paintEvent)
+        if scaled_img_width < self.width():
+            self._view_offset.setX(0)
+        else:
+            # Limitar bordes (no ir más allá de 0 o el máximo)
+            max_x_offset = self._original_pixmap.width() - (self.width() / self._current_scale)
+            self._view_offset.setX(max(0.0, min(self._view_offset.x(), max(0.0, max_x_offset))))
+
+        if scaled_img_height < self.height():
+            self._view_offset.setY(0)
+        else:
+            # Limitar bordes
+            max_y_offset = self._original_pixmap.height() - (self.height() / self._current_scale)
+            self._view_offset.setY(max(0.0, min(self._view_offset.y(), max(0.0, max_y_offset))))
+
+    def paintEvent(self, event: QPaintEvent):
+        """Dibuja la porción visible de la imagen."""
+
+        if self.is_thumbnail_view:
+            super().paintEvent(event)
+            return
+
+        if self._original_pixmap.isNull():
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+
+        # --- LÓGICA DE DIBUJADO Y CENTRADO ---
+
+        # 1. Calcular el tamaño de la imagen escalada
+        scaled_width = self._original_pixmap.width() * self._current_scale
+        scaled_height = self._original_pixmap.height() * self._current_scale
+
+        # 2. Calcular dónde dibujar en la pantalla (Target Rect)
+        #    Si la imagen es más pequeña que la ventana, la centramos.
+
+        target_x = 0.0
+        target_y = 0.0
+
+        if scaled_width < self.width():
+            target_x = (self.width() - scaled_width) / 2.0
+
+        if scaled_height < self.height():
+            target_y = (self.height() - scaled_height) / 2.0
+
+        # El rectángulo de destino en la pantalla
+        target_rect = QRectF(target_x, target_y, scaled_width, scaled_height)
+
+        # 3. Calcular qué parte de la imagen original vamos a dibujar (Source Rect)
+        src_x = self._view_offset.x()
+        src_y = self._view_offset.y()
+
+        # El ancho/alto de la fuente es el ancho/alto de la imagen escalada / escala
+        # (Esto es lo que _clamp_view_offset ya validó que no se sale de los bordes)
+        src_width = scaled_width / self._current_scale
+        src_height = scaled_height / self._current_scale
+
+        # Si la imagen es más pequeña, dibujamos todo (offset es 0)
+        if scaled_width < self.width():
+            src_width = self._original_pixmap.width()
+        if scaled_height < self.height():
+            src_height = self._original_pixmap.height()
+
+        source_rect = QRectF(src_x, src_y, src_width, src_height)
+
+        # 4. Dibujar
+        painter.drawPixmap(target_rect, self._original_pixmap, source_rect)
+        painter.end()
+
+    def resizeEvent(self, event):
+        """Gestiona el redimensionamiento del label."""
+        if not self.is_thumbnail_view:
+            self.fitToWindow()
+        super().resizeEvent(event)
 
     def _open_preview(self):
-        """
-        Abre el diálogo de vista previa a pantalla completa, solo si no hay
-        otro ya abierto.
-        """
-        # Prevenir que se abran múltiples vistas previas a la vez
+        """Abre el diálogo de vista previa a pantalla completa (Ctrl+Rueda)."""
         if ImagePreviewDialog.is_showing:
             return
-
         if not self.original_path:
             return
-        
-        # Cargamos la imagen completa para la vista previa
+
         full_pixmap = QPixmap(self.original_path)
         if full_pixmap.isNull():
             return
 
-        # Creamos y mostramos el diálogo con animación
         preview_dialog = ImagePreviewDialog(full_pixmap, self)
         preview_dialog.show_with_animation()
-
-    def _updateScaledPixmap(self):
-        """Aplica el zoom actual al pixmap original."""
-        if self._original_pixmap.isNull():
-            return
-
-        new_size = self._original_pixmap.size() * self._current_scale
-        self.setPixmap(self._original_pixmap.scaled(
-            new_size,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
-        ))
-
-    def mouseDoubleClickEvent(self, event):
-        """Maneja el doble clic (para la vista de miniaturas)."""
-        if self.original_path:
-            self.doubleClickedPath.emit(self.original_path)
-        super().mouseDoubleClickEvent(event)
 
 # -----------------------------------------------------------------
 # CLASE MODIFICADA: PhotoDetailDialog (con Splitter y guardado de año/mes)
