@@ -54,7 +54,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QStyle, QFileDialog,
     QScrollArea, QGridLayout, QLabel, QGroupBox, QSpacerItem, QSizePolicy,
-    QSplitter
+    QSplitter, QTabWidget
 )
 from PySide6.QtCore import (
     Qt, QSize, QObject, Signal, QThread, Slot, QTimer,
@@ -383,12 +383,18 @@ class ZoomableClickableLabel(QLabel):
                 if event.angleDelta().y() < 0:
                     self._open_preview()
                 else:
-                    super().wheelEvent(event) # Pasa al ScrollArea
+                    # Si es Ctrl+Rueda Arriba, la ignoramos y pasamos al scroll
+                    super().wheelEvent(event)
             else:
-                # Si NO es miniatura (es vista previa o detalle), Ctrl+Rueda CIERRA
-                parent_dialog = self.window()
-                if isinstance(parent_dialog, ImagePreviewDialog):
-                    parent_dialog.close_with_animation()
+                # Si NO es miniatura (es vista previa o detalle),
+                # Ctrl+Rueda Abajo CIERRA
+                # --- !! LÍNEA MODIFICADA !! ---
+                if event.angleDelta().y() > 0:
+                    parent_dialog = self.window()
+                    if isinstance(parent_dialog, ImagePreviewDialog):
+                        parent_dialog.close_with_animation()
+                # Si es Ctrl+Rueda Arriba, la ignoramos (no hace zoom, no cierra)
+
             return # Evento consumido
 
         # --- LÓGICA DE SCROLL/ZOOM (SIN CTRL) ---
@@ -583,51 +589,72 @@ class PhotoDetailDialog(QDialog):
         self._load_metadata()
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        self.splitter = QSplitter(Qt.Vertical)
-        self.image_label = ZoomableClickableLabel()
-        self.splitter.addWidget(self.image_label)
+        # 1. Crear el QTabWidget
+        self.tab_widget = QTabWidget()
 
-        metadata_container = QWidget()
-        metadata_layout = QVBoxLayout(metadata_container)
+        # 2. Crear la Pestaña "Fotos" (Contendrá el splitter actual)
+        fotos_tab_widget = QWidget()
+        fotos_layout = QVBoxLayout(fotos_tab_widget)
+        fotos_layout.setContentsMargins(0, 0, 0, 0) # Sin márgenes
 
-        # --- Layout para edición de fecha ---
-        edit_layout = QHBoxLayout()
-        year_label = QLabel("Año:")
-        self.year_edit = QLineEdit()
-        self.year_edit.setMaximumWidth(80)
+        # 3. Crear el Splitter (como antes, pero lo añadiremos al fotos_layout)
+        self.main_splitter = QSplitter(Qt.Horizontal)
 
-        month_label = QLabel("Mes:")
-        self.month_combo = QComboBox()
-        # Poblar con nombres de meses localizados
-        self.month_combo.addItem("Mes Desconocido", "00")
-        for i in range(1, 13):
-            # Usamos strftime para obtener el nombre del mes de forma segura
-            month_name = datetime.date(1900, i, 1).strftime('%B').capitalize()
-            self.month_combo.addItem(month_name, f"{i:02d}")
+        # --- (Inicio: Código del Splitter - Lado Izquierdo: Fotos) ---
+        photo_area_widget = QWidget()
+        self.photo_container_layout = QVBoxLayout(photo_area_widget)
+        self.photo_container_layout.setSpacing(20)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setWidget(photo_area_widget)
+        self.scroll_area.verticalScrollBar().valueChanged.connect(self._load_visible_thumbnails)
+        self.main_splitter.addWidget(self.scroll_area)
+        # --- (Fin: Lado Izquierdo: Fotos) ---
 
-        edit_layout.addWidget(year_label)
-        edit_layout.addWidget(self.year_edit)
-        edit_layout.addWidget(month_label)
-        edit_layout.addWidget(self.month_combo)
-        edit_layout.addStretch()
-        metadata_layout.addLayout(edit_layout)
+        # --- (Inicio: Código del Splitter - Lado Derecho: Navegación) ---
+        right_panel_widget = QWidget()
+        right_panel_layout = QVBoxLayout(right_panel_widget)
+        top_controls = QVBoxLayout()
+        self.select_dir_button = QPushButton("Cambiar Directorio")
+        self.select_dir_button.clicked.connect(self._open_directory_dialog)
+        top_controls.addWidget(self.select_dir_button)
+        self.path_label = QLabel("Ruta: No configurada")
+        self.path_label.setWordWrap(True)
+        top_controls.addWidget(self.path_label)
+        right_panel_layout.addLayout(top_controls)
 
-        self.metadata_table = QTableWidget()
-        self.metadata_table.setColumnCount(2)
-        self.metadata_table.setHorizontalHeaderLabels(["Metadato", "Valor"])
-        self.metadata_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.metadata_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        metadata_layout.addWidget(self.metadata_table)
+        year_label = QLabel("Navegación por Fecha:")
+        right_panel_layout.addWidget(year_label)
+        self.date_tree_widget = QTreeWidget()
+        self.date_tree_widget.setHeaderHidden(True)
+        self.date_tree_widget.currentItemChanged.connect(self._scroll_to_item)
+        right_panel_layout.addWidget(self.date_tree_widget)
 
-        button_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Close)
-        button_box.accepted.connect(self._save_metadata)
-        button_box.rejected.connect(self.reject)
-        metadata_layout.addWidget(button_box)
+        self.status_label = QLabel("Estado: Inicializando...")
+        right_panel_layout.addWidget(self.status_label)
+        self.main_splitter.addWidget(right_panel_widget)
+        # --- (Fin: Lado Derecho: Navegación) ---
 
-        self.splitter.addWidget(metadata_container)
-        self.splitter.setSizes([700, 300])
-        layout.addWidget(self.splitter)
+        # 4. Añadir el splitter al layout de la Pestaña "Fotos"
+        fotos_layout.addWidget(self.main_splitter)
+
+        # 5. Crear la Pestaña "Personas" (Placeholder)
+        self.personas_tab_widget = QWidget()
+        personas_layout = QVBoxLayout(self.personas_tab_widget)
+        # (Aquí es donde irá la futura cuadrícula de caras)
+        personas_layout.addWidget(QLabel("Próximamente: Gestión de Caras y Personas"))
+
+        # 6. Añadir las pestañas al TabWidget
+        self.tab_widget.addTab(fotos_tab_widget, "Fotos")
+        self.tab_widget.addTab(self.personas_tab_widget, "Personas")
+
+        # 7. Establecer el TabWidget como el Widget Central
+        self.setCentralWidget(self.tab_widget)
+
+        # 8. Cargar el estado del splitter (como antes)
+        right_panel_widget.setMinimumWidth(180)
+        self.main_splitter.splitterMoved.connect(self._save_splitter_state)
+        self._load_splitter_state()
 
     def _load_photo(self):
         """Carga la foto completa y la pasa al label de zoom."""

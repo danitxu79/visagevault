@@ -73,7 +73,7 @@ class VisageVaultDB:
             """)
 
             conn.commit()
-            print("Tablas verificadas y listas.")
+            # print("Tablas verificadas y listas.")
         except sqlite3.Error as e:
             print(f"Error al crear/migrar tablas: {e}")
         finally:
@@ -137,6 +137,115 @@ class VisageVaultDB:
             cursor.execute("SELECT year, month FROM photos WHERE filepath = ?", (filepath,))
             result = cursor.fetchone()
             return (result['year'], result['month']) if result else None
+        except sqlite3.Error:
+            return None
+        finally:
+            conn.close()
+
+    def add_person(self, name: str) -> int:
+        """Añade una nueva persona y devuelve su ID."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO people (name) VALUES (?)", (name,))
+            conn.commit()
+            return cursor.lastrowid
+        except sqlite3.Error as e:
+            print(f"Error al añadir persona: {e}")
+            return -1
+        finally:
+            conn.close()
+
+    def get_person_by_name(self, name: str):
+        """Busca una persona por su nombre."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM people WHERE name = ?", (name,))
+            return cursor.fetchone()
+        finally:
+            conn.close()
+
+    def get_all_people(self) -> list:
+        """Devuelve una lista de todas las personas conocidas."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM people ORDER BY name")
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def add_face(self, photo_id: int, encoding: bytes, location: str) -> int:
+        """Añade una cara detectada a la BD y devuelve su ID."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO faces (photo_id, encoding, location) VALUES (?, ?, ?)",
+                           (photo_id, encoding, location))
+            conn.commit()
+            return cursor.lastrowid
+        except sqlite3.Error as e:
+            print(f"Error al añadir cara: {e}")
+            return -1
+        finally:
+            conn.close()
+
+    def link_face_to_person(self, face_id: int, person_id: int):
+        """Asigna (o re-asigna) una cara a una persona."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            # 'INSERT OR REPLACE' maneja la re-asignación (corrige errores)
+            cursor.execute("INSERT OR REPLACE INTO face_labels (face_id, person_id) VALUES (?, ?)",
+                           (face_id, person_id))
+            conn.commit()
+        except sqlite3.Error as e:
+            print(f"Error al etiquetar cara: {e}")
+        finally:
+            conn.close()
+
+    def get_unknown_faces(self) -> list:
+        """Devuelve todas las caras que aún no están asignadas a una persona."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            # Busca caras (faces.id) que NO están en la tabla face_labels
+            cursor.execute("""
+                SELECT f.id, f.photo_id, f.location, p.filepath
+                FROM faces f
+                JOIN photos p ON f.photo_id = p.id
+                LEFT JOIN face_labels fl ON f.id = fl.face_id
+                WHERE fl.person_id IS NULL
+            """)
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def get_faces_for_person(self, person_id: int) -> list:
+        """Devuelve todas las fotos asociadas con una persona."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT p.filepath, f.location
+                FROM photos p
+                JOIN faces f ON p.id = f.photo_id
+                JOIN face_labels fl ON f.id = fl.face_id
+                WHERE fl.person_id = ?
+            """, (person_id,))
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def get_photo_id(self, filepath: str) -> int | None:
+        """Obtiene el ID de la foto (PK) a partir de su ruta."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM photos WHERE filepath = ?", (filepath,))
+            result = cursor.fetchone()
+            return result['id'] if result else None
         except sqlite3.Error:
             return None
         finally:
