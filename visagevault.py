@@ -134,6 +134,52 @@ class ThumbnailLoader(QRunnable):
             self.signals.load_failed.emit(self.original_filepath)
 
 # =================================================================
+# SEÑALES Y WORKER PARA CARGAR Y RECORTAR CARAS
+# =================================================================
+class FaceLoaderSignals(QObject):
+    """Contenedor de señales para el FaceLoader QRunnable."""
+    face_loaded = Signal(int, QPixmap, str) # face_id, pixmap, photo_path
+    face_load_failed = Signal(int) # face_id
+
+class FaceLoader(QRunnable):
+    """QRunnable para cargar y CORTAR una cara de forma asíncrona."""
+
+    def __init__(self, signals: FaceLoaderSignals, face_id: int, photo_path: str, location_str: str):
+        super().__init__()
+        self.signals = signals
+        self.face_id = face_id
+        self.photo_path = photo_path
+        self.location_str = location_str
+
+    @Slot()
+    def run(self):
+        """Ejecuta la tarea de recorte en el hilo del pool."""
+        try:
+            # --- Lógica de recorte (la parte LENTA) ---
+            location = ast.literal_eval(self.location_str)
+            (top, right, bottom, left) = location
+            img = Image.open(self.photo_path)
+            face_image_pil = img.crop((left, top, right, bottom))
+
+            pixmap = QPixmap()
+            buffer = QBuffer()
+            buffer.open(QIODevice.OpenModeFlag.ReadWrite)
+            face_image_pil.save(buffer, "PNG")
+            pixmap.loadFromData(buffer.data())
+            buffer.close()
+            # --- Fin de la lógica de recorte ---
+
+            if pixmap.isNull():
+                raise Exception("QPixmap nulo después de la conversión.")
+
+            # Emitir el resultado
+            self.signals.face_loaded.emit(self.face_id, pixmap, self.photo_path)
+
+        except Exception as e:
+            print(f"Error en FaceLoader (ID: {self.face_id}): {e}")
+            self.signals.face_load_failed.emit(self.face_id)
+
+# =================================================================
 # CLASE PARA VISTA PREVIA CON ZOOM (QDialog)
 # =================================================================
 class ImagePreviewDialog(QDialog):
@@ -225,36 +271,43 @@ class CircularFaceLabel(QLabel):
     Un QLabel que muestra un QPixmap recortado en forma de círculo
     y emite una señal 'clicked' cuando se presiona.
     """
-    # --- NUEVA SEÑAL ---
     clicked = Signal()
 
     def __init__(self, pixmap: QPixmap, parent=None):
         super().__init__(parent)
-        self.setFixedSize(100, 100) # Tamaño fijo para la cuadrícula de caras
-
-        # Escala la imagen para que "rellene" el círculo
-        self._pixmap = pixmap.scaled(100, 100, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-        self.setToolTip("Cara detectada (Haz clic para etiquetar)")
+        self.setFixedSize(100, 100)
         self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Cara detectada (Haz clic para etiquetar)")
+        self.setAlignment(Qt.AlignCenter) # Centrar el texto "..."
+
+        self._pixmap = QPixmap() # Empezar vacío
+        if pixmap and not pixmap.isNull():
+            self.setPixmap(pixmap) # Establecer la imagen inicial si se proporciona
+
+    def setPixmap(self, pixmap: QPixmap):
+        """Establece el pixmap y lo escala para rellenar el círculo."""
+        if pixmap.isNull():
+            self._pixmap = QPixmap()
+        else:
+            self._pixmap = pixmap.scaled(100, 100, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        self.update() # Forzar repintado
 
     def paintEvent(self, event: QPaintEvent):
         """Pinta la imagen de forma circular."""
+        if self._pixmap.isNull():
+            # Si el pixmap está vacío, deja que QLabel dibuje el texto ("...")
+            super().paintEvent(event)
+            return
+
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing) # Suavizado de bordes
+        painter.setRenderHint(QPainter.Antialiasing)
 
         path = QPainterPath()
-        # Crea un círculo/elipse del tamaño del widget
         path.addEllipse(0, 0, self.width(), self.height())
-
-        # Establece el círculo como la "máscara" de recorte
         painter.setClipPath(path)
-
-        # Dibuja la imagen
         painter.drawPixmap(0, 0, self._pixmap)
-
         painter.end()
 
-    # --- NUEVO MÉTODO ---
     def mousePressEvent(self, event):
         """Emite la señal 'clicked' al hacer clic."""
         if event.button() == Qt.LeftButton:
@@ -707,50 +760,65 @@ class PhotoFinderWorker(QObject):
         super().__init__()
         self.directory_path = directory_path
         self.db = db_manager
+        self.is_running = True
 
     @Slot()
     def run(self):
-        self.progress.emit("Cargando fechas conocidas desde la BD...")
-        db_dates = self.db.load_all_photo_dates()
-
-        self.progress.emit("Escaneando archivos en el directorio...")
-        # 1. Llama a find_photos UNA SOLA VEZ
-        photo_paths_on_disk = find_photos(self.directory_path)
-
-        # 2. Crea el set a partir de la lista (rápido, en memoria)
-        photo_paths_on_disk_set = set(photo_paths_on_disk)
-
+        # Definir fuera del 'try' para que 'finally' pueda acceder a ella
         photos_by_year_month = {}
-        photos_to_upsert_in_db = []
 
-        for path in photo_paths_on_disk:
-            if path in db_dates:
-                year, month = db_dates[path]
-            else:
-                self.progress.emit(f"Procesando nueva foto: {Path(path).name}")
-                year, month = get_photo_date(path)
-                photos_to_upsert_in_db.append((path, year, month))
-            
-            if year not in photos_by_year_month:
-                photos_by_year_month[year] = {}
-            if month not in photos_by_year_month[year]:
-                photos_by_year_month[year][month] = []
-            photos_by_year_month[year][month].append(path)
+        try:
+            self.progress.emit("Cargando fechas conocidas desde la BD...")
+            db_dates = self.db.load_all_photo_dates()
 
-        self.progress.emit("Buscando fotos eliminadas...")
-        db_paths_set = set(db_dates.keys())
-        paths_to_delete = list(db_paths_set - photo_paths_on_disk_set)
+            self.progress.emit("Escaneando archivos en el directorio...")
+            # 1. Llama a find_photos UNA SOLA VEZ
+            photo_paths_on_disk = find_photos(self.directory_path)
 
-        if paths_to_delete:
-            self.progress.emit(f"Eliminando {len(paths_to_delete)} fotos de la BD...")
-            self.db.bulk_delete_photos(paths_to_delete) # (Necesitarías crear este método en db_manager)
+            # 2. Crea el set a partir de la lista (rápido, en memoria)
+            photo_paths_on_disk_set = set(photo_paths_on_disk)
 
-        if photos_to_upsert_in_db:
-            self.progress.emit(f"Guardando {len(photos_to_upsert_in_db)} fotos nuevas en la BD...")
-            self.db.bulk_upsert_photos(photos_to_upsert_in_db)
+            photos_to_upsert_in_db = []
 
-        self.progress.emit(f"Escaneo finalizado. Encontradas {len(photo_paths_on_disk)} fotos.")
-        self.finished.emit(photos_by_year_month)
+            for path in photo_paths_on_disk:
+                if not self.is_running:
+                    break
+                if path in db_dates:
+                    year, month = db_dates[path]
+                else:
+                    self.progress.emit(f"Procesando nueva foto: {Path(path).name}")
+                    year, month = get_photo_date(path)
+                    photos_to_upsert_in_db.append((path, year, month))
+
+                if year not in photos_by_year_month:
+                    photos_by_year_month[year] = {}
+                if month not in photos_by_year_month[year]:
+                    photos_by_year_month[year][month] = []
+                photos_by_year_month[year][month].append(path)
+
+            self.progress.emit("Buscando fotos eliminadas...")
+            db_paths_set = set(db_dates.keys())
+            paths_to_delete = list(db_paths_set - photo_paths_on_disk_set)
+
+            if paths_to_delete:
+                self.progress.emit(f"Eliminando {len(paths_to_delete)} fotos de la BD...")
+                self.db.bulk_delete_photos(paths_to_delete)
+
+            if photos_to_upsert_in_db:
+                self.progress.emit(f"Guardando {len(photos_to_upsert_in_db)} fotos nuevas en la BD...")
+                self.db.bulk_upsert_photos(photos_to_upsert_in_db)
+
+            self.progress.emit(f"Escaneo finalizado. Encontradas {len(photo_paths_on_disk)} fotos.")
+
+        except Exception as e:
+            print(f"Error crítico en el hilo PhotoFinderWorker: {e}")
+            self.progress.emit(f"Error en escaneo de fotos: {e}")
+            # photos_by_year_month se quedará vacío o parcialmente lleno
+
+        finally:
+            # ¡MUY IMPORTANTE! Emitir 'finished' siempre,
+            # para que el hilo se limpie y la UI se desbloquee.
+            self.finished.emit(photos_by_year_month)
 
 # =================================================================
 # CLASE TRABAJADORA DEL ESCANEO DE CARAS (QThread)
@@ -759,6 +827,7 @@ class FaceScanSignals(QObject):
     """Señales para el trabajador de escaneo de caras."""
     scan_progress = Signal(str)
     scan_percentage = Signal(int)
+    face_found = Signal(int, str, str) # face_id, photo_path, location_str
     scan_finished = Signal() # Se emite cuando todo el lote ha terminado
 
 class FaceScanWorker(QObject):
@@ -769,6 +838,7 @@ class FaceScanWorker(QObject):
         super().__init__()
         self.db = db_manager
         self.signals = FaceScanSignals()
+        self.is_running = True
 
     @Slot()
     def run(self):
@@ -788,6 +858,8 @@ class FaceScanWorker(QObject):
             self.signals.scan_progress.emit(f"Escaneando {total} fotos nuevas para caras...")
 
             for i, row in enumerate(unscanned_photos):
+                if not self.is_running:
+                    break
                 photo_id = row['id']
                 photo_path = row['filepath']
 
@@ -816,7 +888,9 @@ class FaceScanWorker(QObject):
                         location_str = str(loc) # Guardamos la tupla (top, right, bottom, left) como string
                         encoding_blob = pickle.dumps(enc) # Serializamos el array numpy
 
-                        self.db.add_face(photo_id, encoding_blob, location_str)
+                        face_id = self.db.add_face(photo_id, encoding_blob, location_str)
+                        # Emitir la cara que acabamos de encontrar
+                        self.signals.face_found.emit(face_id, photo_path, location_str)
 
                     # 4. Marcar la foto como procesada
                     self.db.mark_photo_as_scanned(photo_id)
@@ -852,11 +926,15 @@ class VisageVaultApp(QMainWindow):
         self.face_scan_thread = None
         self.face_scan_worker = None
         self.face_loading_label = None
+        self.current_face_count = 0
         self.threadpool = QThreadPool()
         self.threadpool.setMaxThreadCount(os.cpu_count() or 4)
         self.thumb_signals = ThumbnailLoaderSignals()
         self.thumb_signals.thumbnail_loaded.connect(self._update_thumbnail)
         self.thumb_signals.load_failed.connect(self._handle_thumbnail_failed)
+        self.face_loader_signals = FaceLoaderSignals()
+        self.face_loader_signals.face_loaded.connect(self._handle_face_loaded)
+        self.face_loader_signals.face_load_failed.connect(self._handle_face_load_failed)
         self.resize_timer = QTimer(self)
         self.resize_timer.setSingleShot(True)
         self.resize_timer.setInterval(200) # 200ms de espera
@@ -1031,7 +1109,7 @@ class VisageVaultApp(QMainWindow):
 
         self.worker.finished.connect(self.thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
+        #self.thread.finished.connect(self.thread.deleteLater)
         self.thread.finished.connect(self._on_scan_thread_finished)
 
         self.select_dir_button.setEnabled(False)
@@ -1053,13 +1131,14 @@ class VisageVaultApp(QMainWindow):
         # Conectar señales del worker
         self.face_scan_worker.signals.scan_progress.connect(self._set_status)
         self.face_scan_worker.signals.scan_percentage.connect(self._update_face_scan_percentage)
-        self.face_scan_worker.signals.scan_finished.connect(self._load_faces_to_grid)
+        self.face_scan_worker.signals.face_found.connect(self._handle_face_found)
+        self.face_scan_worker.signals.scan_finished.connect(self._handle_scan_finished)
 
         # Conectar control del hilo
         self.face_scan_thread.started.connect(self.face_scan_worker.run)
         self.face_scan_worker.signals.scan_finished.connect(self.face_scan_thread.quit)
         self.face_scan_worker.signals.scan_finished.connect(self.face_scan_worker.deleteLater)
-        self.face_scan_thread.finished.connect(self.face_scan_thread.deleteLater)
+        self.face_scan_thread.finished.connect(self._on_face_scan_thread_finished)
 
         self._set_status("Iniciando escaneo de caras...")
         self.face_scan_thread.start()
@@ -1278,15 +1357,6 @@ class VisageVaultApp(QMainWindow):
         print(f"Redibujando layout para el nuevo ancho.")
         self._display_photos()
 
-    @Slot()
-    def _on_scan_thread_finished(self):
-        """
-        Slot de limpieza que se llama cuando el QThread ha terminado.
-        Resetea las variables de Python.
-        """
-        self.thread = None
-        self.worker = None
-
     @Slot(str)
     def _open_photo_detail(self, original_path):
         """Abre la ventana de detalle de la foto."""
@@ -1338,43 +1408,35 @@ class VisageVaultApp(QMainWindow):
         """
         Se llama cuando el usuario cambia de pestaña (Fotos <-> Personas).
         """
-        # Obtenemos el nombre de la pestaña
         tab_name = self.tab_widget.tabText(index)
 
         if tab_name == "Personas":
             self._set_status("Cargando vista de personas...")
             self._load_people_list()
 
-            # --- INICIO DE LA MODIFICACIÓN ---
-
-            # Comprobar SI YA hay un escaneo en curso ANTES de tocar la UI
+            # Si ya hay un escaneo, nos vamos. La UI ya está en modo "streaming".
             if self.face_scan_thread and self.face_scan_thread.isRunning():
-                # Ya hay un escaneo. No hacer nada.
-                # El label de porcentaje que ya existía seguirá actualizándose.
-                # No limpiamos la cuadrícula, no ponemos un nuevo label de "0%".
                 self._set_status("Escaneo de caras en curso...")
-            else:
-                # No hay escaneo. Este es un inicio limpio.
+                return
 
-                # 1. Limpiar la cuadrícula inmediatamente
-                while self.unknown_faces_layout.count() > 0:
-                    item = self.unknown_faces_layout.takeAt(0)
-                    if item.widget(): item.widget().deleteLater()
+            # --- Si no hay escaneo, preparamos la UI ---
 
-                # 2. Mostrar el mensaje y GUARDAR la referencia
-                self.face_loading_label = QLabel("Buscando caras de personas... 0%")
-                self.face_loading_label.setAlignment(Qt.AlignCenter)
-                self.face_loading_label.setStyleSheet("font-size: 14pt;")
+            # 1. Limpiar la cuadrícula y resetear el contador
+            while self.unknown_faces_layout.count() > 0:
+                item = self.unknown_faces_layout.takeAt(0)
+                if item.widget(): item.widget().deleteLater()
+            self.current_face_count = 0
+            if self.face_loading_label:
+                self.face_loading_label.deleteLater()
+                self.face_loading_label = None
 
-                self.unknown_faces_layout.addWidget(self.face_loading_label, 0, 0, Qt.AlignCenter)
+            # --- LÍNEA MODIFICADA ---
+            # 2. Cargar las caras existentes de forma ASÍNCRONA
+            self._load_existing_faces_async()
+            # --- FIN DE MODIFICACIÓN ---
 
-                # 3. Iniciar el escaneo (ahora sí)
-                self._start_face_scan()
-
-            # --- FIN DE LA MODIFICACIÓN ---
-
-            # La llamada a _load_people_list() ya la hicimos arriba
-            # La llamada a _load_faces_to_grid() sigue comentada (¡correcto!)
+            # 3. Iniciar un *nuevo* escaneo (que streameará nuevas caras)
+            self._start_face_scan()
 
     def _load_people_list(self):
         """
@@ -1386,85 +1448,43 @@ class VisageVaultApp(QMainWindow):
         unknown_item = QTreeWidgetItem(self.people_tree_widget, ["Caras Sin Asignar"])
         self.people_tree_widget.setCurrentItem(unknown_item)
 
-    def _load_faces_to_grid(self):
+    def _load_existing_faces_async(self):
         """
-        Carga las caras "Sin Asignar" desde la BD y las muestra en la cuadrícula.
+        Carga las caras existentes de la BD de forma asíncrona.
+        No bloquea la UI: obtiene los datos (rápido) y pone a trabajar
+        al QThreadPool (lento).
         """
-        self.face_loading_label = None
-        # 1. Limpiar la cuadrícula actual
-        while self.unknown_faces_layout.count() > 0:
-            item = self.unknown_faces_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-
-        # 2. Cargar las caras de la BD
-        unknown_faces = self.db.get_unknown_faces()
-
+        unknown_faces = self.db.get_unknown_faces() # Rápido
         if not unknown_faces:
-            placeholder_label = QLabel("No se han encontrado caras nuevas sin asignar.")
-            placeholder_label.setAlignment(Qt.AlignCenter)
-            self.unknown_faces_layout.addWidget(placeholder_label, 0, 0)
+            self.current_face_count = 0
             return
 
-        # 3. Calcular el ancho para la cuadrícula responsive
-        #    Restamos 30px para dar margen al borde y la barra de scroll.
-        viewport_width = self.face_scroll_area.viewport().width() - 30
+        self.current_face_count = len(unknown_faces)
 
-        #    (Ancho del widget 100px + 10px de espacio entre ellos)
-        widget_width = 100 + 10
+        # Calcular grid
+        num_cols = max(1, (self.face_scroll_area.viewport().width() - 30) // 110)
 
-        # 4. Calcular cuántas columnas caben (asegurando un mínimo de 1)
-        num_cols = max(1, viewport_width // widget_width)
-
-        # 5. Iterar y mostrar las caras
         for i, face_row in enumerate(unknown_faces):
-            try:
-                face_id = face_row['id']
-                photo_path = face_row['filepath']
-                location_str = face_row['location']
+            face_id = face_row['id']
 
-                # Convertir el string "(top, right, bottom, left)" a tupla
-                location = ast.literal_eval(location_str)
-                (top, right, bottom, left) = location
+            # 1. Crear un *placeholder*
+            face_widget = CircularFaceLabel(QPixmap()) # Pixmap vacío
+            face_widget.setText("...") # Pone "..."
+            face_widget.setProperty("face_id", face_id)
 
-                # Recortar la cara desde la imagen original usando PIL
-                img = Image.open(photo_path)
-                face_image_pil = img.crop((left, top, right, bottom))
+            # 2. Añadir placeholder al grid
+            row, col = i // num_cols, i % num_cols
+            self.unknown_faces_layout.addWidget(face_widget, row, col, Qt.AlignTop)
 
-                # Convertir la imagen PIL a QPixmap (en memoria, sin guardar)
-                pixmap = QPixmap()
-                buffer = QBuffer()
-                buffer.open(QIODevice.OpenModeFlag.ReadWrite)
-                # Guardamos como PNG para mantener la calidad
-                face_image_pil.save(buffer, "PNG")
-                pixmap.loadFromData(buffer.data())
-                buffer.close()
-
-                if pixmap.isNull():
-                    raise Exception("QPixmap nulo después de la conversión.")
-
-                # Crear el widget circular
-                face_widget = CircularFaceLabel(pixmap)
-                face_widget.setProperty("face_id", face_id)
-                face_widget.setProperty("photo_path", photo_path)
-
-                # Conectar el clic (para el próximo paso)
-                face_widget.clicked.connect(self._on_face_clicked)
-
-                # Añadir a la cuadrícula
-                row, col = i // num_cols, i % num_cols
-                self.unknown_faces_layout.addWidget(face_widget, row, col, Qt.AlignTop)
-
-            except Exception as e:
-                print(f"Error al cargar/recortar la cara ID {face_id} de {photo_path}: {e}")
-                # Si falla, mostramos un placeholder de error
-                error_label = QLabel(f"Error\nCara ID: {face_id}")
-                error_label.setFixedSize(100, 100)
-                error_label.setAlignment(Qt.AlignCenter)
-                row, col = i // num_cols, i % num_cols
-                self.unknown_faces_layout.addWidget(error_label, row, col, Qt.AlignTop)
-
-        # Añadir un stretch al final para que todo se alinee arriba
-        self.unknown_faces_layout.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding), len(unknown_faces) // num_cols + 1, 0)
+            # 3. Iniciar el worker para este placeholder
+            loader = FaceLoader(
+                self.face_loader_signals,
+                face_id,
+                face_row['filepath'],
+                face_row['location']
+            )
+            # El QThreadPool hará el trabajo pesado
+            self.threadpool.start(loader)
 
     @Slot()
     def _on_face_clicked(self):
@@ -1488,12 +1508,173 @@ class VisageVaultApp(QMainWindow):
     @Slot(int)
     def _update_face_scan_percentage(self, percentage):
         """
-        Actualiza el label de carga en la pestaña 'Personas' con el porcentaje.
+        Actualiza el label de carga. Si no existe, lo crea
+        DEBAJO del group box de caras.
         """
-        # Solo actualiza si el label de carga todavía existe
-        # (no se ha terminado y borrado por _load_faces_to_grid)
-        if self.face_loading_label:
+        if not self.face_loading_label:
+            # Si el label no existe, lo creamos
+            self.face_loading_label = QLabel(f"Buscando caras de personas... {percentage}%")
+            self.face_loading_label.setAlignment(Qt.AlignCenter)
+            self.face_loading_label.setStyleSheet("font-size: 14pt;")
+
+            # --- MODIFICACIÓN CLAVE ---
+            # Lo añadimos al layout VERTICAL (face_container_layout),
+            # no al grid (unknown_faces_layout).
+            # Lo insertamos en la posición 1 (después del GroupBox [0]
+            # y antes del stretch [2]).
+            self.face_container_layout.insertWidget(1, self.face_loading_label, 0, Qt.AlignCenter)
+            # --- FIN DE MODIFICACIÓN ---
+        else:
+            # Si ya existe, solo actualizamos el texto
             self.face_loading_label.setText(f"Buscando caras de personas... {percentage}%")
+
+    @Slot(int, str, str)
+    def _handle_face_found(self, face_id: int, photo_path: str, location_str: str):
+        """
+        Recibe una *NUEVA* cara del worker (FaceScanWorker),
+        y lanza un task al QThreadPool para cortarla y añadirla.
+        NO bloquea la UI.
+        """
+
+        # Iniciar el worker para esta *nueva* cara
+        # Usamos el *mismo* FaceLoader que para las caras existentes
+        loader = FaceLoader(
+            self.face_loader_signals,
+            face_id,
+            photo_path,
+            location_str
+        )
+        self.threadpool.start(loader)
+
+        # NO incrementamos self.current_face_count aquí.
+        # Lo incrementamos en el slot que recibe el pixmap final.
+
+    @Slot()
+    def _handle_scan_finished(self):
+        """
+        Limpia el label de "Loading..." cuando el escaneo termina.
+        """
+        if self.face_loading_label:
+            # Si el escaneo terminó (100%) y no encontró nada,
+            # el label "Loading 100%" sigue ahí. Lo borramos.
+            self.face_loading_label.deleteLater()
+            self.face_loading_label = None
+
+        # Si no había caras y no se encontró ninguna, ponemos el mensaje
+        if self.current_face_count == 0:
+            placeholder = QLabel("No se han encontrado caras.")
+            placeholder.setAlignment(Qt.AlignCenter)
+            self.unknown_faces_layout.addWidget(placeholder, 0, 0, Qt.AlignCenter)
+
+    @Slot()
+    def _on_scan_thread_finished(self):
+        """
+        Slot de limpieza que se llama cuando el QThread ha terminado.
+        Resetea las variables de Python.
+        """
+        # Primero, nos aseguramos de que el hilo (que ya ha terminado)
+        # se elimine de forma segura.
+        if self.thread:
+            self.thread.deleteLater()
+        self.thread = None
+        self.worker = None
+
+    @Slot()
+    def _on_face_scan_thread_finished(self):
+        """
+        Slot de limpieza que se llama cuando el QThread de CARAS ha terminado.
+        Resetea las variables de Python.
+        """
+        self.face_scan_thread = None
+        self.face_scan_worker = None
+
+    @Slot(int, QPixmap, str)
+    def _handle_face_loaded(self, face_id: int, pixmap: QPixmap, photo_path: str):
+        """
+        Recibe un pixmap CORTADO desde el QThreadPool (FaceLoader).
+        Puede ser una cara 'existente' o una 'nueva'.
+        Esta función SÍ se ejecuta en el hilo principal y es segura.
+        """
+        # Buscar si hay un placeholder para esta cara
+        placeholder = None
+        for i in range(self.unknown_faces_layout.count()):
+            widget = self.unknown_faces_layout.itemAt(i).widget()
+            if widget and widget.property("face_id") == face_id:
+                placeholder = widget
+                break
+
+        if placeholder:
+            # Es una cara 'existente', actualizamos el placeholder
+            placeholder.setPixmap(pixmap)
+            placeholder.setText("") # Borrar el "..."
+            placeholder.setProperty("photo_path", photo_path)
+            placeholder.clicked.connect(self._on_face_clicked)
+        else:
+            # Es una cara 'nueva' (del FaceScanWorker), la añadimos al final
+            face_widget = CircularFaceLabel(pixmap)
+            face_widget.setProperty("face_id", face_id)
+            face_widget.setProperty("photo_path", photo_path)
+            face_widget.clicked.connect(self._on_face_clicked)
+
+            # Añadir al grid en la siguiente posición
+            num_cols = max(1, (self.face_scroll_area.viewport().width() - 30) // 110)
+            row = self.current_face_count // num_cols
+            col = self.current_face_count % num_cols
+            self.unknown_faces_layout.addWidget(face_widget, row, col, Qt.AlignTop)
+
+            # Incrementar el contador global
+            self.current_face_count += 1
+
+    @Slot(int)
+    def _handle_face_load_failed(self, face_id: int):
+        """Maneja el fallo de carga de una cara."""
+        placeholder = None
+        for i in range(self.unknown_faces_layout.count()):
+            widget = self.unknown_faces_layout.itemAt(i).widget()
+            if widget and widget.property("face_id") == face_id:
+                placeholder = widget
+                break
+        if placeholder:
+            placeholder.setText("Error")
+
+    def closeEvent(self, event):
+        """
+        Se ejecuta al cerrar la ventana principal (ej: clic en 'X').
+        Limpia de forma segura todos los hilos antes de salir.
+        """
+        print("Cerrando aplicación... Por favor, espere.")
+        self._set_status("Cerrando... esperando a que terminen las tareas de fondo.")
+
+        # 1. Detener el hilo de escaneo de fotos (si está activo)
+        if self.thread and self.thread.isRunning():
+            print("Deteniendo el hilo de escaneo de fotos...")
+            # Desconectar señales para evitar que actualicen la UI mientras se cierra
+            if self.worker:
+                self.worker.is_running = False
+                try: self.worker.finished.disconnect()
+                except RuntimeError: pass # Ignora si ya estaba desconectado
+
+            self.thread.quit() # Pide al hilo que termine
+            self.thread.wait(3000)  # Espera hasta 3 segundos
+
+        # 2. Detener el hilo de escaneo de caras (si está activo)
+        if self.face_scan_thread and self.face_scan_thread.isRunning():
+            print("Deteniendo el hilo de escaneo de caras...")
+            if self.face_scan_worker:
+                self.face_scan_worker.is_running = False
+                try: self.face_scan_worker.signals.scan_finished.disconnect()
+                except RuntimeError: pass # Ignora si ya estaba desconectado
+
+            self.face_scan_thread.quit() # Pide al hilo que termine
+            self.face_scan_thread.wait(3000) # Espera hasta 3 segundos
+
+        # 3. Esperar a que el pool de QRunnables termine
+        print("Esperando tareas del ThreadPool (miniaturas/caras)...")
+        self.threadpool.clear() # Cancela tareas encoladas que no hayan empezado
+        self.threadpool.waitForDone(3000)
+
+        print("Todos los hilos finalizados. Saliendo.")
+        event.accept()
 
 def run_visagevault():
     """Función para iniciar la aplicación gráfica."""
