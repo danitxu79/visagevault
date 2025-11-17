@@ -31,9 +31,9 @@ if [ ! -f "linuxdeploy-x86_64.AppImage" ]; then
     exit 1
 fi
 
-echo "NOTA: Asegúrate de que 'visagevault.png' sea un icono CUADRADO (ej: 256x256 o 512x512)."
-echo "Presiona Enter para continuar o Ctrl+C para cancelar y arreglar el icono..."
-read
+# echo "NOTA: Asegúrate de que 'visagevault.png' sea un icono CUADRADO (ej: 256x256 o 512x512)."
+# echo "Presiona Enter para continuar o Ctrl+C para cancelar y arreglar el icono..."
+# read
 
 # --- PASO 1: Limpiar builds anteriores ---
 echo "--- PASO 1: Limpiando builds anteriores ---"

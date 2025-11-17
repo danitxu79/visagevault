@@ -1,8 +1,3 @@
-Aquí tienes el archivo `README.md` actualizado.
-
-He modificado la descripción, la lista de características y, lo más importante, la sección de **Requisitos** para incluir las nuevas dependencias (como `opencv` y `ffmpeg`) que necesita la función de vídeo.
-
-Puedes copiar y pegar este contenido directamente en tu archivo `README.md`.
 
 -----
 
