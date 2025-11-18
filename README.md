@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://github.com/danitxu79/visagevault/raw/master/visagevault.png" alt="Logo de VisageVault">
+</p>
+
 
 -----
 
@@ -13,12 +17,15 @@ VisageVault es una aplicación de escritorio para macOS, Windows y Linux, diseñ
   * **Escaneo de Directorios:** Analiza recursivamente tu carpeta de medios para encontrar todas las imágenes (`.jpg`, `.png`, etc.) **y vídeos** (`.mp4`, `.mkv`, `.mov`, etc.).
   * **Organización por Fecha:** Agrupa automáticamente las fotos y vídeos por Año y Mes, leyendo los metadatos EXIF o la fecha de archivo.
   * **Soporte de Vídeo Dedicado:** Una pestaña separada para navegar por tus vídeos, con generación de miniaturas (usando OpenCV) y reproducción mediante doble clic (abre el reproductor predeterminado del sistema).
+  * **Soporte RAW:** **Visualización y reconocimiento facial en formatos RAW comunes (.NEF, .CR2, etc.)**.
   * **Detección de Caras (en Fotos):** Utiliza `face_recognition` para escanear cada foto y detectar todas las caras presentes.
   * **Agrupamiento (Clustering):** Compara todas las caras "Desconocidas" y las agrupa (usando `sklearn.cluster.DBSCAN`) para sugerir personas que son la misma.
   * **Etiquetado Sencillo:** Una interfaz dedicada para revisar las caras agrupadas y asignarles un nombre.
   * **Navegación por Persona:** Una vez etiquetadas, puedes ver todas las fotos en las que aparece una persona específica.
-  * **Gestión de Metadatos:** Permite editar la fecha (Año/Mes) de las fotos si los metadatos son incorrectos.
-  * **Caché de Miniaturas:** Genera y almacena miniaturas para fotos y vídeos para una carga y navegación ultra rápidas.
+  * **Gestión de Metadatos:** Permite editar la fecha (Año/Mes) de las fotos si los metadatos son incorrectos, **guardando el cambio permanentemente en el archivo (EXIF/Fecha de Archivo)**.
+  * **Gestión de Archivos:** **Menú contextual para Ocultar/Restaurar archivos de la vista o Eliminarlos permanentemente del disco.**
+  * **Selección Mejorada:** **Soporte de selección de rango (Shift + Clic) y por arrastre (cuadro de selección).**
+  * **Caché de Miniaturas:** Genera y almacena miniaturas para fotos y vídeos para una carga y navegación ultra rápidas.**
 
 -----
 
@@ -52,8 +59,9 @@ Todos los paquetes de Python necesarios están listados en `requirements.txt`. L
   * `face_recognition` (Para la detección de caras)
   * `scikit-learn` (Para el clustering de caras)
   * `Pillow` (Para el manejo de imágenes)
-  * `piexif` (Para leer y escribir metadatos EXIF)
-  * **`opencv-python-headless` (¡Nuevo\! Para la generación de miniaturas de vídeo)**
+  * `piexif` **(Para leer y escribir metadatos EXIF, ahora usado para la persistencia)**
+  * `rawpy` **(Nuevo - Para el soporte de archivos RAW)**
+  * `opencv-python-headless` (¡Nuevo\! Para la generación de miniaturas de vídeo)**
 
 -----
 
@@ -62,7 +70,7 @@ Todos los paquetes de Python necesarios están listados en `requirements.txt`. L
 1.  **Clona el repositorio:**
 
     ```bash
-    git clone https://github.com/danitxu79/VisageVault.git
+    git clone [https://github.com/danitxu79/VisageVault.git](https://github.com/danitxu79/VisageVault.git)
     cd VisageVault
     ```
 
@@ -81,8 +89,6 @@ Todos los paquetes de Python necesarios están listados en `requirements.txt`. L
 
       * (Este paso puede tardar varios minutos, ya que compilará `dlib` y `numpy`).
 
-    <!-- end list -->
-
     ```bash
     pip install -r requirements.txt
     ```
@@ -99,7 +105,7 @@ source venv/bin/activate
 
 # Inicia la aplicación
 python visagevault.py
-```
+````
 
 La primera vez que la ejecutes, te pedirá que selecciones el directorio raíz que contiene tus fotos y vídeos.
 
@@ -107,7 +113,7 @@ La primera vez que la ejecutes, te pedirá que selecciones el directorio raíz q
 
 ## 📦 Compilación (AppImage para Linux)
 
-Este repositorio incluye un script `compila.sh` (o `build.sh`) que automatiza la creación de una AppImage autocontenida usando **PyInstaller** y **linuxdeploy**.
+Este repositorio incluye un script `compila.sh` que automatiza la creación de una AppImage autocontenida usando **PyInstaller** y **linuxdeploy**.
 
 Este script maneja los pasos complejos de empaquetado, incluyendo las importaciones ocultas (`--hidden-import`) de `numpy`, `sklearn` y `scipy`.
 
@@ -120,7 +126,7 @@ Además de los requisitos de ejecución, para compilar la AppImage necesitarás:
       * **En Debian/Ubuntu:** `sudo apt install qt6-base-dev`
 2.  **Herramientas de AppImage:**
     ```bash
-    wget https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+    wget [https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage](https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage)
     chmod +x linuxdeploy-x86_64.AppImage
     ```
 3.  **pyenv (Recomendado):** El script está configurado para usar `pyenv local 3.11.9` para asegurar una compilación consistente.
@@ -145,3 +151,6 @@ Este proyecto se ofrece bajo un modelo de **Doble Licencia (Dual License)**:
 2.  **Comercial (Privativa):** Si los términos de la LGPLv3 no se ajustan a tus necesidades (por ejemplo, para software propietario de código cerrado), por favor contacta al autor para adquirir una licencia comercial.
 
 Para más detalles, consulta el archivo `LICENSE` o la cabecera de `visagevault.py`.
+
+```
+```
