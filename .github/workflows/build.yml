@@ -6,14 +6,13 @@ on:
 
 jobs:
   # ========================================================
-  # TAREA 1: CONSTRUIR EL .EXE PARA WINDOWS
+  # TAREA 1: WINDOWS (Corregido: Usando bash para sintaxis segura)
   # ========================================================
   build-windows:
     runs-on: windows-latest
-    # Usar bash para evitar problemas con los caracteres de escape de PowerShell
     defaults:
       run:
-        shell: bash
+        shell: bash  # <--- CLAVE: Usar bash en Windows para evitar errores de PowerShell
     steps:
       - uses: actions/checkout@v4
 
@@ -27,7 +26,7 @@ jobs:
           pip install pyinstaller cmake
 
       - name: Construir .exe con PyInstaller
-        # Usamos \ para salto de linea en bash
+        # Usamos \ para saltos de línea (bash syntax)
         run: |
           pyinstaller --noconfirm \
             --onefile \
@@ -52,7 +51,7 @@ jobs:
           prerelease: false
 
   # ========================================================
-  # TAREA 2: CONSTRUIR EL .DMG PARA MACOS
+  # TAREA 2: MACOS (Corregido: Instalar create-dmg con brew)
   # ========================================================
   build-macos:
     runs-on: macos-latest
@@ -63,11 +62,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Instalar dependencias (Python y Sistema)
+      - name: Instalar dependencias
         run: |
           pip install -r requirements.txt
           pip install pyinstaller cmake
-          # Instalar create-dmg con Homebrew, no con pip
+          # CORRECCIÓN: Usar brew para create-dmg
           brew install create-dmg
 
       - name: Construir .app con PyInstaller
@@ -87,9 +86,8 @@ jobs:
             visagevault.py
 
       - name: Crear .dmg
-        # create-dmg requiere la ruta al .app generado en dist/
         run: |
-          # Asegurar que el directorio dist existe y contiene la app
+          # Verificar que la app se creó
           ls -R dist/
           create-dmg \
             --volname "VisageVault Installer" \
@@ -111,7 +109,7 @@ jobs:
           prerelease: false
 
   # ========================================================
-  # TAREA 3: CONSTRUIR PAQUETES DE LINUX
+  # TAREA 3: LINUX (Corregido: Ruta en .desktop)
   # ========================================================
   build-linux:
     runs-on: ubuntu-latest
@@ -156,22 +154,21 @@ jobs:
 
       - name: Empaquetar AppDir
         run: |
-          # Crear estructura
           mkdir -p AppDir/usr/bin
           mkdir -p AppDir/usr/share/applications
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
 
-          # Copiar binarios (todo el contenido de dist/VisageVault)
+          # Copiar binarios
           cp -r dist/VisageVault/* AppDir/usr/bin/
 
-          # Asegurar permisos de ejecución
+          # Permisos
           chmod +x AppDir/usr/bin/VisageVault
 
-          # Copiar icono
+          # Iconos
           cp visagevault.png AppDir/usr/share/icons/hicolor/256x256/apps/visagevault.png
           cp visagevault.png AppDir/visagevault.png
 
-          # Crear .desktop
+          # CORRECCIÓN: Cambiar Exec para que linuxdeploy lo encuentre
           cat << EOF > AppDir/usr/share/applications/visagevault.desktop
           [Desktop Entry]
           Name=VisageVault
@@ -183,19 +180,17 @@ jobs:
           Terminal=false
           EOF
 
-          # Copia también en raiz para linuxdeploy (por si acaso)
           cp AppDir/usr/share/applications/visagevault.desktop AppDir/
 
       - name: Generar AppImage
         run: |
-          # Forzar el entorno para que linuxdeploy encuentre el ejecutable
           export LINUXDEPLOY_OUTPUT_VERSION="${{ github.event.release.tag_name }}"
 
           ./linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
             --executable AppDir/usr/bin/VisageVault \
             --desktop-file AppDir/usr/share/applications/visagevault.desktop \
-            --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/visagevault.png \
+            --icon-file AppDir/visagevault.png \
             --output appimage
 
       - name: Generar paquetes DEB/RPM/PKG
