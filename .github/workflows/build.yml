@@ -125,10 +125,11 @@ jobs:
           python-version: '3.11'
 
       - name: Install system dependencies
+        # AÑADIDO: libarchive-tools necesario para 'bsdtar' (error 127) en creación de paquetes pacman
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake libopenblas-dev liblapack-dev \
-            ffmpeg qt6-base-dev ruby-dev
+            ffmpeg qt6-base-dev ruby-dev libarchive-tools
           sudo gem install fpm
 
       - name: Download linuxdeploy
@@ -163,7 +164,10 @@ jobs:
           mkdir -p AppDir/usr/share/applications
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
 
-          cp dist/visagevault/visagevault AppDir/usr/bin/
+          # CORRECCIÓN: Copiar TODO el contenido del directorio dist (libs + ejecutable)
+          cp -r dist/visagevault/* AppDir/usr/bin/
+
+          # Asegurar permisos
           chmod +x AppDir/usr/bin/visagevault
 
           cp visagevault.png AppDir/usr/share/icons/hicolor/256x256/apps/visagevault.png
