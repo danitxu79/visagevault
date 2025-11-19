@@ -61,7 +61,7 @@ fpm -s dir -t rpm \
     -v "$CLEAN_VERSION" \
     --iteration "1" \
     --description "$APP_DESCRIPTION" \
-    --maintainer "$APP_MAINTAINER" \tu-email@ejemplo.com
+    --maintainer "$APP_MAINTAINER" \dani.eus79@gmail.com.com
     --vendor "$APP_VENDOR" \
     -p "$APP_NAME-$CLEAN_VERSION.rpm" \
     --url 'https://github.com/danitxu79/visagevault' \

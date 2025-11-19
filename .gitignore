@@ -5,6 +5,7 @@ venv/
 __pycache__/
 *.pyc
 .python-version
+face_cache/
 
 # ==================================
 # Artefactos de Build (PyInstaller)

@@ -77,13 +77,11 @@ import ast
 import pickle
 
 def resource_path(relative_path):
-    """ Obtiene la ruta absoluta al recurso, funciona para dev y para PyInstaller """
-    try:
-        # PyInstaller crea una carpeta temporal y guarda la ruta en _MEIPASS
+    """Obtiene la ruta absoluta al recurso tanto en PyInstaller como en desarrollo."""
+    if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
 # --- Configuración regional para nombres de meses ---
@@ -161,6 +159,9 @@ class FaceLoaderSignals(QObject):
     face_loaded = Signal(int, QPixmap, str)
     face_load_failed = Signal(int)
 
+# =================================================================
+# CLASE OPTIMIZADA: CARGA DE CARAS CON CACHÉ DE DISCO
+# =================================================================
 class FaceLoader(QRunnable):
     def __init__(self, signals: FaceLoaderSignals, face_id: int, photo_path: str, location_str: str):
         super().__init__()
@@ -168,33 +169,41 @@ class FaceLoader(QRunnable):
         self.face_id = face_id
         self.photo_path = photo_path
         self.location_str = location_str
+        # Definimos la ruta donde debería estar la miniatura guardada
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.cache_path = os.path.join(base_dir, "face_cache", f"face_{self.face_id}.jpg")
 
     @Slot()
     def run(self):
         try:
+            pixmap = QPixmap()
+
+            # 1. INTENTO DE CARGA RÁPIDA (CACHÉ)
+            # Si el archivo pequeño ya existe, lo cargamos y terminamos. ¡Instantáneo!
+            if os.path.exists(self.cache_path):
+                if pixmap.load(self.cache_path):
+                    self.signals.face_loaded.emit(self.face_id, pixmap, self.photo_path)
+                    return
+
+            # 2. SI NO EXISTE CACHÉ: PROCESO LENTO (Abrir original y recortar)
             location = ast.literal_eval(self.location_str)
             (top, right, bottom, left) = location
 
-            # Definir extensiones RAW
             RAW_EXTENSIONS = ('.nef', '.cr2', '.cr3', '.crw', '.arw', '.srf', '.orf', '.rw2', '.raf', '.pef', '.dng', '.raw')
             file_suffix = Path(self.photo_path).suffix.lower()
 
             img = None
 
-            # --- LÓGICA DE CARGA SEGÚN TIPO DE ARCHIVO ---
             if file_suffix in RAW_EXTENSIONS:
-                # Usar rawpy para archivos RAW
                 try:
                     with rawpy.imread(self.photo_path) as raw:
-                        rgb_array = raw.postprocess() # Devuelve array numpy
-                        img = Image.fromarray(rgb_array) # Convertir a PIL Image
+                        rgb_array = raw.postprocess()
+                        img = Image.fromarray(rgb_array)
                 except Exception as e:
                     print(f"Error rawpy en FaceLoader: {e}")
                     raise e
             else:
-                # Usar PIL directo para JPG/PNG
                 img = Image.open(self.photo_path)
-            # ---------------------------------------------
 
             if img is None:
                 raise Exception("No se pudo cargar la imagen base")
@@ -202,8 +211,18 @@ class FaceLoader(QRunnable):
             # Recortar la cara
             face_image_pil = img.crop((left, top, right, bottom))
 
-            # Convertir PIL a QPixmap
-            pixmap = QPixmap()
+            # 3. GUARDAR EN CACHÉ (Para que la próxima vez sea rápido)
+            try:
+                # Convertimos a RGB por si acaso (para guardar en JPG)
+                if face_image_pil.mode != "RGB":
+                    face_image_pil = face_image_pil.convert("RGB")
+
+                # Guardamos el recorte en la carpeta face_cache
+                face_image_pil.save(self.cache_path, "JPEG", quality=90)
+            except Exception as e:
+                print(f"No se pudo guardar caché para cara {self.face_id}: {e}")
+
+            # 4. Convertir a QPixmap para mostrar ahora mismo
             buffer = QBuffer()
             buffer.open(QIODevice.OpenModeFlag.ReadWrite)
             face_image_pil.save(buffer, "PNG")
@@ -216,7 +235,8 @@ class FaceLoader(QRunnable):
             self.signals.face_loaded.emit(self.face_id, pixmap, self.photo_path)
 
         except Exception as e:
-            print(f"Error en FaceLoader (ID: {self.face_id}): {e}")
+            # Si falla, emitimos señal de fallo pero no rompemos el programa
+            # print(f"Error en FaceLoader (ID: {self.face_id}): {e}")
             self.signals.face_load_failed.emit(self.face_id)
 
 # =================================================================
@@ -793,7 +813,7 @@ class FaceClusterDialog(QDialog):
         num_cols = max(1, (self.width() - 50) // 110)
         for i, face_id in enumerate(self.face_ids):
             face_widget = CircularFaceLabel(QPixmap())
-            face_widget.setText("...")
+            face_widget.setText("Cargando...")
             face_widget.setProperty("face_id", face_id)
             face_widget.clicked.connect(self._show_face_preview)
             row, col = i // num_cols, i % num_cols
@@ -1085,7 +1105,7 @@ class VideoFinderWorker(QObject):
 
             if videos_to_upsert_in_db:
                 self.progress.emit(f"Guardando {len(videos_to_upsert_in_db)} vídeos nuevos en la BD...")
-                self.db.bulk_upsert_videos(videos_to_upsert_in_db)
+                self.db.bulk_upsert_videos(videos_Image.open(to_upsert_in_db))
 
             self.progress.emit(f"Escaneo de vídeos finalizado. Encontrados {len(video_paths_on_disk)} vídeos.")
             # --- FIN DE MODIFICACIÓN ---
@@ -1197,6 +1217,11 @@ class VisageVaultApp(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
         else:
             print(f"Advertencia: No se pudo encontrar el icono en {icon_path}")
+
+        self.cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "face_cache")
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
+
         self.setMinimumSize(QSize(900, 600))
         self.db = VisageVaultDB()
         self.current_directory = None
@@ -1633,7 +1658,7 @@ class VisageVaultApp(QMainWindow):
 
                 # --- USAMOS LA LISTA FILTRADA (visible_photos) ---
                 for photo_path in visible_photos:
-                    item = QListWidgetItem("...")
+                    item = QListWidgetItem("Cargando...")
                     item.setToolTip(Path(photo_path).name)
                     item.setSizeHint(QSize(item_w, item_h))
                     item.setData(Qt.UserRole, photo_path)
@@ -1757,7 +1782,7 @@ class VisageVaultApp(QMainWindow):
 
                 # --- USAR LISTA FILTRADA ---
                 for video_path in visible_videos:
-                    item = QListWidgetItem("...")
+                    item = QListWidgetItem("Cargando...")
                     item.setToolTip(Path(video_path).name)
                     item.setSizeHint(QSize(item_w, item_h))
                     item.setData(Qt.UserRole, video_path)
@@ -2154,6 +2179,7 @@ class VisageVaultApp(QMainWindow):
         num_fotos = sum(len(photos) for months in photos_by_year_month.values() for photos in months.values())
         self._set_status(f"Escaneo de fotos finalizado. {num_fotos} fotos encontradas.")
         self._display_photos()
+        self._start_face_scan()
 
     @Slot(dict)
     def _handle_video_search_finished(self, videos_by_year_month):
@@ -2189,7 +2215,7 @@ class VisageVaultApp(QMainWindow):
                         original_path = item.data(Qt.UserRole)
                         if original_path:
                             item.setData(Qt.UserRole + 1, "loading") # Marcar como "cargando"
-                            item.setText("...") # Asegurarse de que el texto de carga está
+                            item.setText("Cargando...") # Asegurarse de que el texto de carga está
 
                             loader = ThumbnailLoader(original_path, self.thumb_signals)
                             self.threadpool.start(loader)
@@ -2216,7 +2242,7 @@ class VisageVaultApp(QMainWindow):
                         original_path = item.data(Qt.UserRole)
                         if original_path:
                             item.setData(Qt.UserRole + 1, "loading") # Marcar como "cargando"
-                            item.setText("...")
+                            item.setText("Cargando...")
 
                             loader = VideoThumbnailLoader(original_path, self.thumb_signals)
                             self.threadpool.start(loader)
@@ -2269,7 +2295,7 @@ class VisageVaultApp(QMainWindow):
             item.setSizeHint(scaled_pixmap.size())
             # ----------------------------------------------------------------------
 
-            item.setText("") # Quitar el texto "..."
+            item.setText("") # Quitar el texto "Cargando..."
             item.setData(Qt.UserRole + 1, "loaded")
             return
 
@@ -2293,7 +2319,7 @@ class VisageVaultApp(QMainWindow):
             item.setSizeHint(scaled_pixmap.size())
             # ----------------------------------------------------------------------
 
-            item.setText("") # Quitar el texto "..."
+            item.setText("") # Quitar el texto "Cargando..."
             item.setData(Qt.UserRole + 1, "loaded")
             return
 
@@ -2333,7 +2359,7 @@ class VisageVaultApp(QMainWindow):
             item = self.photo_list_widget_items[original_path]
             icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon) # Icono genérico
             item.setIcon(icon)
-            item.setText("") # Quitar "..."
+            item.setText("") # Quitar "Cargando..."
             item.setData(Qt.UserRole + 1, "failed") # Marcar como fallido
             return
 
@@ -2342,7 +2368,7 @@ class VisageVaultApp(QMainWindow):
             item = self.video_list_widget_items[original_path]
             icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon) # Icono genérico
             item.setIcon(icon)
-            item.setText("") # Quitar "..."
+            item.setText("") # Quitar "Cargando..."
             item.setData(Qt.UserRole + 1, "failed") # Marcar como fallido
             return
 
@@ -2537,26 +2563,35 @@ class VisageVaultApp(QMainWindow):
 
     @Slot(int)
     def _on_tab_changed(self, index):
-        """
-        Se llama cuando el usuario cambia de pestaña (Fotos <-> Personas).
-        """
+        """Se llama cuando el usuario cambia de pestaña."""
+        # Limpiamos cola de hilos para priorizar lo que se ve ahora
+        self.threadpool.clear()
+
         tab_name = self.tab_widget.tabText(index)
 
         if tab_name == "Personas":
             self._set_status("Cargando vista de personas...")
             self._load_people_list()
-            if self.face_scan_thread and self.face_scan_thread.isRunning():
-                self._set_status("Escaneo de caras en curso...")
-                return
-            while self.unknown_faces_layout.count() > 0:
-                item = self.unknown_faces_layout.takeAt(0)
-                if item.widget(): item.widget().deleteLater()
-            self.current_face_count = 0
+
+            # NOTA: Ya NO borramos manualmente los widgets aquí.
+            # Dejamos que _load_existing_faces_async decida qué añadir.
+
             if self.face_loading_label:
                 self.face_loading_label.deleteLater()
                 self.face_loading_label = None
-            self._load_existing_faces_async()
-            self._start_face_scan()
+
+            # Cargar caras (modo incremental)
+            # Si vengo de 'Caras Eliminadas', necesito resetear la vista a 'Desconocidas'
+            current_item = self.people_tree_widget.currentItem()
+            if current_item and current_item.data(0, Qt.UserRole) == -2:
+                 # Si estaba en eliminadas, aquí no hacemos nada, dejamos que el usuario navegue
+                 pass
+            else:
+                 # Si estoy en vista normal, cargo lo nuevo
+                 self._load_existing_faces_async()
+
+            if self.face_scan_thread and self.face_scan_thread.isRunning():
+                 self._set_status("Mostrando caras. Escaneo sigue en segundo plano...")
 
     def _load_people_list(self):
         self.people_tree_widget.clear()
@@ -2575,29 +2610,64 @@ class VisageVaultApp(QMainWindow):
             people_root_item.setExpanded(True)
         self.people_tree_widget.setCurrentItem(unknown_item)
 
-    def _populate_face_grid_async(self, face_list: list, is_deleted_view: bool = False):
-        while self.unknown_faces_layout.count() > 0:
-            item = self.unknown_faces_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-        self.current_face_count = 0
-        if not face_list:
-            placeholder = QLabel("No se han encontrado caras.")
-            placeholder.setAlignment(Qt.AlignCenter)
-            self.unknown_faces_layout.addWidget(placeholder, 0, 0, Qt.AlignCenter)
+    def _populate_face_grid_async(self, face_list: list, is_deleted_view: bool = False, append: bool = False):
+        """Rellena la rejilla de caras de forma robusta e incremental."""
+
+        # Si NO es append (es una carga total), limpiamos todo
+        if not append:
+            while self.unknown_faces_layout.count() > 0:
+                item = self.unknown_faces_layout.takeAt(0)
+                if item.widget(): item.widget().deleteLater()
+            self.current_face_count = 0
+
+            if not face_list:
+                placeholder = QLabel("No se han encontrado caras.")
+                placeholder.setAlignment(Qt.AlignCenter)
+                self.unknown_faces_layout.addWidget(placeholder, 0, 0, Qt.AlignCenter)
+                return
+
+        # Si es append y no hay nada nuevo, salimos
+        if append and not face_list:
             return
-        self.current_face_count = len(face_list)
+
+        # Limpiar placeholder de "No se han encontrado" si existe
+        if self.unknown_faces_layout.count() == 1:
+            item = self.unknown_faces_layout.itemAt(0)
+            widget = item.widget()
+            if isinstance(widget, QLabel) and not isinstance(widget, CircularFaceLabel):
+                 widget.deleteLater()
+                 self.current_face_count = 0
+
+        # Recalcular columnas disponibles
         viewport_width = self.left_people_stack.width() - 30
         num_cols = max(1, viewport_width // 110)
+
+        # --- MEJORA: Usar el conteo real del layout para no pisar items ---
+        # Esto asegura que si borraste una cara, la nueva no intente ocupar su hueco antiguo erróneamente
+        start_index = self.unknown_faces_layout.count()
+
         for i, face_row in enumerate(face_list):
             face_id = face_row['id']
+
+            # Crear el widget de la cara
             face_widget = CircularFaceLabel(QPixmap())
-            face_widget.setText("...")
+            # Usamos un texto más claro o vacío mientras carga
+            face_widget.setText("Cargando...")
+            face_widget.setStyleSheet("color: gray; font-size: 10px;")
+
             face_widget.setProperty("face_id", face_id)
             face_widget.setProperty("is_deleted_view", is_deleted_view)
             face_widget.rightClicked.connect(self._on_face_right_clicked)
             face_widget.clicked.connect(self._on_face_clicked)
-            row, col = i // num_cols, i % num_cols
+
+            # Calcular posición exacta (Flow Layout simulado)
+            current_idx = start_index + i
+            row = current_idx // num_cols
+            col = current_idx % num_cols
+
             self.unknown_faces_layout.addWidget(face_widget, row, col, Qt.AlignTop)
+
+            # Lanzar carga de imagen en segundo plano
             loader = FaceLoader(
                 self.face_loader_signals,
                 face_id,
@@ -2606,12 +2676,41 @@ class VisageVaultApp(QMainWindow):
             )
             self.threadpool.start(loader)
 
+        # Actualizamos el contador global
+        self.current_face_count = start_index + len(face_list)
+
     def _load_existing_faces_async(self):
+        """Carga solo las caras nuevas que no estén ya visualizadas."""
         self.unknown_faces_group.setTitle("Caras Sin Asignar")
         self.cluster_faces_button.setEnabled(True)
         self.show_deleted_faces_button.setEnabled(True)
-        unknown_faces = self.db.get_unknown_faces()
-        self._populate_face_grid_async(unknown_faces, is_deleted_view=False)
+
+        # 1. Obtener todas las caras candidatas de la BD
+        all_unknown_faces = self.db.get_unknown_faces()
+
+        # 2. Mapear qué IDs ya tenemos pintados en pantalla
+        existing_ids = set()
+        count_widgets = self.unknown_faces_layout.count()
+
+        for i in range(count_widgets):
+            item = self.unknown_faces_layout.itemAt(i)
+            if item and item.widget():
+                # Solo nos interesan los widgets que son caras (CircularFaceLabel)
+                # Ignoramos QLabels de "No hay fotos" o "Cargando"
+                fid = item.widget().property("face_id")
+                if fid is not None:
+                    existing_ids.add(fid)
+
+        # 3. Filtrar: Quedarnos solo con las caras que NO están en pantalla
+        new_faces_to_add = [f for f in all_unknown_faces if f['id'] not in existing_ids]
+
+        # 4. Decidir si limpiamos o añadimos
+        # Si hay IDs existentes, es un APPEND. Si no, es una carga inicial (CLEAR).
+        is_append = (len(existing_ids) > 0)
+
+        # Solo llamamos a populate si hay algo nuevo que añadir o si es una carga inicial vacía
+        if new_faces_to_add or not is_append:
+            self._populate_face_grid_async(new_faces_to_add, is_deleted_view=False, append=is_append)
 
     @Slot()
     def _on_face_clicked(self):
@@ -2714,6 +2813,18 @@ class VisageVaultApp(QMainWindow):
 
     @Slot(int, str, str)
     def _handle_face_found(self, face_id: int, photo_path: str, location_str: str):
+        """
+        Se llama cada vez que el escáner encuentra una cara nueva en segundo plano.
+        """
+        # --- OPTIMIZACIÓN CRÍTICA ---
+        # Si NO estamos en la pestaña 'Personas', no cargamos la miniatura visual.
+        # La cara ya está guardada en la BD, así que se cargará cuando el usuario cambie de pestaña.
+        # Esto evita que se sature el procesador mientras navegas por fotos/vídeos.
+        if self.tab_widget.currentWidget() != self.personas_tab_widget:
+            return
+        # ----------------------------
+
+        # Si estamos en la pestaña Personas, cargamos la miniatura inmediatamente
         loader = FaceLoader(
             self.face_loader_signals,
             face_id,
@@ -3043,7 +3154,7 @@ class VisageVaultApp(QMainWindow):
 
         for path in hidden_paths:
             if not os.path.exists(path): continue
-            item = QListWidgetItem("...")
+            item = QListWidgetItem("Cargando...")
             item.setSizeHint(QSize(item_w, item_h))
             item.setData(Qt.UserRole, path)
             item.setData(Qt.UserRole + 1, "not_loaded")
@@ -3094,7 +3205,7 @@ class VisageVaultApp(QMainWindow):
 
         for path in hidden_paths:
             if not os.path.exists(path): continue
-            item = QListWidgetItem("...")
+            item = QListWidgetItem("Cargando...")
             item.setSizeHint(QSize(item_w, item_h))
             item.setData(Qt.UserRole, path)
             item.setData(Qt.UserRole + 1, "not_loaded")
