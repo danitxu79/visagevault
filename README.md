@@ -2,9 +2,6 @@
   <img src="https://github.com/danitxu79/visagevault/raw/master/visagevault.png" alt="Logo de VisageVault">
 </p>
 
-````markdown
-
-
 # 📸 VisageVault
 
 **VisageVault** es un gestor de fotografías y vídeos inteligente, local y privado. Organiza tu 
@@ -55,35 +52,38 @@ Para más detalles, consulta el archivo `LICENSE` o la cabecera de `visagevault.
 Para ejecutar VisageVault, necesitas **Python 3.11 o superior**.
 
 ### Dependencias de Sistema (Compilación)
+
 La librería `face_recognition` y `rawpy` requieren herramientas de compilación de C++ 
   instaladas:
+
 * **Windows:** Visual Studio con "Desarrollo para el escritorio con C++".
 * **Linux:** `cmake`, `gcc`, `libarchive-tools` (para empaquetado).
   ```bash
   sudo apt install build-essential cmake libopenblas-dev liblapack-dev ffmpeg libarchive-tools
   ```
-
 * **Mac:** Xcode command line tools.
 
 ### Librerías Python
 
 Asegúrate de que tu `requirements.txt` esté actualizado. Las dependencias clave son:
 
-  * `PySide6` (Interfaz gráfica)
-  * `face_recognition` (IA Facial)
-  * `scikit-learn` (Clustering de caras)
-  * `watchdog` **(Nuevo - Monitorización de archivos)**
-  * `rawpy` (Soporte RAW)
-  * `opencv-python-headless` (Miniaturas de vídeo y Ojos Rojos)
-  * `piexif` (Escritura EXIF)
-  * `numpy`, `Pillow`
+* `PySide6` (Interfaz gráfica)
+* `face_recognition` (IA Facial)
+* `scikit-learn` (Clustering de caras)
+* `watchdog` **(Nuevo - Monitorización de archivos)**
+* `rawpy` (Soporte RAW)
+* `opencv-python-headless` (Miniaturas de vídeo y Ojos Rojos)
+* `piexif` (Escritura EXIF)
+* `numpy`, `Pillow`
+
+---
 
 ## 🚀 Instalación
 
 1.  **Clonar el repositorio:**
 
     ```bash
-    git clone [https://github.com/danitxu79/visagevault.git](https://github.com/danitxu79/visagevault.git)
+    git clone https://github.com/danitxu79/visagevault.git
     cd visagevault
     ```
 
@@ -100,16 +100,16 @@ Asegúrate de que tu `requirements.txt` esté actualizado. Las dependencias clav
     python visagevault.py
     ```
 
------
+---
 
 ## 📖 Guía de Uso Rápida
 
 ### Navegación y Vistas
 
-  * **Árbol de Fechas:** Las secciones de **Años/Meses** muestran solo archivos visibles. La sección 
-      **Ocultas** muestra los archivos que has archivado y permite Restaurarlos o Eliminarlos.
-  * **Auto-Refresco:** Si copias fotos nuevas a tu carpeta vigilada, aparecerán automáticamente en la 
-      aplicación tras unos segundos.
+* **Árbol de Fechas:** Las secciones de **Años/Meses** muestran solo archivos visibles. La sección 
+    **Ocultas** muestra los archivos que has archivado y permite Restaurarlos o Eliminarlos.
+* **Auto-Refresco:** Si copias fotos nuevas a tu carpeta vigilada, aparecerán automáticamente en la 
+    aplicación tras unos segundos.
 
 ### Menú Contextual (Clic Derecho)
 
@@ -132,6 +132,3 @@ Selecciona uno o varios elementos y haz clic derecho para acceder a las opciones
 | **Selección Múltiple** | `Ctrl` + `Clic` |
 | **Selección de Rango** | `Shift` + `Clic` |
 | **Selección por Arrastre** | Clic izquierdo y arrastrar sobre el fondo gris |
-
-
-````
