@@ -403,7 +403,7 @@ class VisageVaultDB:
                 p.get('thumbnailLink'),
                 p.get('webContentLink'),
                 parent,
-                root_folder_id # <--- Guardamos el ID de la carpeta origen
+                root_folder_id
             ))
 
         with self.conn:
@@ -413,5 +413,28 @@ class VisageVaultDB:
                 ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name,
                 thumbnail_link=excluded.thumbnail_link,
-                root_folder_id=excluded.root_folder_id
+                root_folder_id=excluded.root_folder_id,
+                parent_id=excluded.parent_id  -- <--- ¡ESTA LÍNEA ES NUEVA Y CRÍTICA!
             """, data_to_insert)
+
+
+    def clear_drive_data(self):
+        """
+        SEGURIDAD: Elimina todos los registros de fotos de la nube de la base de datos local.
+        """
+        with self.conn:
+            self.conn.execute("DELETE FROM drive_photos")
+            # Opcional: VACUUM para reducir tamaño del archivo, aunque puede ser lento
+            # self.conn.execute("VACUUM")
+
+    def get_drive_photos_by_parent(self, parent_id):
+        # IMPORTANTE: Esta consulta busca fotos cuyo PADRE DIRECTO sea la carpeta clickeada
+        cursor = self.conn.execute("SELECT * FROM drive_photos WHERE parent_id = ?", (parent_id,))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def update_drive_photo_date(self, file_id, new_iso_date):
+        """
+        Actualiza la fecha de una foto de Drive localmente para reorganizarla.
+        """
+        with self.conn:
+            self.conn.execute("UPDATE drive_photos SET created_time = ? WHERE id = ?", (new_iso_date, file_id))

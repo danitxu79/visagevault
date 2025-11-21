@@ -196,7 +196,7 @@ class DriveManager:
                     q=query,
                     pageSize=1000,
                     pageToken=page_token,
-                    fields="nextPageToken, files(id, name, mimeType, thumbnailLink, webContentLink, createdTime)"
+                    fields="nextPageToken, files(id, name, mimeType, thumbnailLink, webContentLink, createdTime, parents)"
                 ).execute()
             except Exception as e:
                 print(f"⚠️ Error listando imágenes en {folder_id}: {e}")

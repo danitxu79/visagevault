@@ -92,6 +92,7 @@ import face_recognition
 from PIL import Image
 import ast
 import pickle
+import shutil
 
 def resource_path(relative_path):
     """Obtiene la ruta absoluta al recurso tanto en PyInstaller como en desarrollo."""
@@ -431,12 +432,34 @@ class DriveLoginWorker(QObject):
         finally:
             self.finished.emit()
 
+class FolderLoaderWorker(QObject):
+    """
+    Descarga la lista de subcarpetas de un directorio específico en segundo plano.
+    """
+    finished = Signal(list, QTreeWidgetItem) # Emite: (lista_carpetas, item_del_arbol_que_se_expande)
+
+    def __init__(self, folder_id, parent_item):
+        super().__init__()
+        self.folder_id = folder_id
+        self.parent_item = parent_item
+
+    def run(self):
+        try:
+            # Instanciamos un manager independiente para este hilo
+            from drive_manager import DriveManager
+            manager = DriveManager()
+
+            # Obtenemos carpetas (esto puede tardar 1-2 segundos)
+            folders = manager.list_folders(self.folder_id)
+
+            self.finished.emit(folders, self.parent_item)
+        except Exception as e:
+            print(f"Error cargando carpetas: {e}")
+            self.finished.emit([], self.parent_item)
+
 class DriveScanWorker(QObject):
     """
-    Worker 'Silencioso' y Optimizado.
-    1. Escanea Drive.
-    2. Guarda en DB localmente (WAL mode).
-    3. Solo avisa del progreso numérico para no congelar la UI.
+    Worker con capacidad de 'Modo Lento' para ceder prioridad a otras tareas.
     """
     progress = Signal(str)
     finished = Signal(int)
@@ -446,17 +469,23 @@ class DriveScanWorker(QObject):
         self.folder_id = folder_id
         self.db_path = db_path
         self.is_running = True
+        self.slow_mode = False # <--- NUEVA VARIABLE DE CONTROL
+
+    @Slot(bool)
+    def set_slow_mode(self, active):
+        """Slot para activar/desactivar el modo de baja prioridad."""
+        self.slow_mode = active
+        if active:
+            print("🐢 Worker Drive: Entrando en modo lento (Prioridad a carpetas)")
+        else:
+            print("🐇 Worker Drive: Volviendo a velocidad normal")
 
     @Slot()
     def run(self):
-        # --- CONFIGURACIÓN DE LA CONEXIÓN DB ---
         local_db = VisageVaultDB(os.path.basename(self.db_path), is_worker=True)
         local_db.db_path = self.db_path
         local_db.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-
-        # 1. Corrección para evitar bloqueos
         local_db.conn.execute("PRAGMA journal_mode=WAL;")
-        # 2. Corrección para evitar errores de tuplas vs diccionarios
         local_db.conn.row_factory = sqlite3.Row
 
         try:
@@ -466,31 +495,31 @@ class DriveScanWorker(QObject):
             count = 0
             buffer = []
             BATCH_SIZE = 100
-
-            # Usamos time.time() para controlar la frecuencia de actualización
             last_update_time = time.time()
 
-            # Llamamos a la función recursiva (asegúrate de haber puesto el time.sleep en drive_manager.py)
             for batch_of_images in local_manager.list_images_recursively(self.folder_id):
-                if not self.is_running:
-                    break
+                if not self.is_running: break
 
                 buffer.extend(batch_of_images)
+
+                # --- AQUÍ ESTÁ LA MAGIA DE LA PRIORIDAD ---
+                if self.slow_mode:
+                    # Si estamos en modo lento, dormimos 1.5 segundos.
+                    # Esto deja la red y la CPU libres para que el Árbol de Carpetas cargue rápido.
+                    time.sleep(1.5)
+                # ------------------------------------------
 
                 if len(buffer) >= BATCH_SIZE:
                     self._save_to_db(local_db, buffer)
                     count += len(buffer)
                     buffer = []
 
-                    # Actualizar UI solo cada 1 segundo para evitar congelamiento
                     if time.time() - last_update_time > 1.0:
                         self.progress.emit(f"Indexando nube... {count} fotos guardadas.")
                         last_update_time = time.time()
 
-                    # Pequeña pausa para ceder CPU
-                    time.sleep(0.05)
+                    time.sleep(0.05) # Pausa normal
 
-            # Guardar lo restante al final
             if buffer:
                 self._save_to_db(local_db, buffer)
                 count += len(buffer)
@@ -508,7 +537,6 @@ class DriveScanWorker(QObject):
             except: pass
 
     def _save_to_db(self, db_instance, items):
-        """Guarda el lote en la base de datos de forma segura."""
         try:
             db_instance.bulk_upsert_drive_photos(items, root_folder_id=self.folder_id)
         except Exception as e:
@@ -1869,6 +1897,8 @@ class PhotoDirWatcher(QObject):
 # VENTANA PRINCIPAL DE LA APLICACIÓN (VisageVaultApp)
 # =================================================================
 class VisageVaultApp(QMainWindow):
+    # Señales para controlar la velocidad del descargador de fotos
+    set_drive_priority_low = Signal(bool)  # True = Modo Lento, False = Normal
 
     def __init__(self):
         super().__init__()
@@ -1937,6 +1967,9 @@ class VisageVaultApp(QMainWindow):
         self.drive_scan_thread = None
         self.drive_scan_worker = None
         self.drive_loaded_ids = set()
+        self.is_drive_connected = False
+        self.active_folder_threads = []
+        self.current_drive_folder_name = "Inicio"
 
         # --- Hilos y Señales ---
         self.threadpool = QThreadPool()
@@ -1964,6 +1997,7 @@ class VisageVaultApp(QMainWindow):
 
         self._setup_ui()
         QTimer.singleShot(100, self._initial_check)
+        QTimer.singleShot(500, self._check_auto_login)
 
 
     def _setup_ui(self):
@@ -2164,12 +2198,12 @@ class VisageVaultApp(QMainWindow):
         help_layout.addStretch(1)
 
         # ==========================================================
-        # PESTAÑA NUBE (Google Drive) - ORGANIZADA POR FECHA
+        # PESTAÑA NUBE (Google Drive) - MODIFICADA
         # ==========================================================
         self.cloud_tab = QWidget()
         cloud_layout = QVBoxLayout(self.cloud_tab)
 
-        # 1. Cabecera (Botón Login y Cambiar Carpeta)
+        # 1. Cabecera (Botón Login, Cambiar Carpeta y Ver Árbol)
         header_layout = QHBoxLayout()
         self.btn_gdrive = QPushButton("Iniciar sesión con Google")
         self.btn_gdrive.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DriveNetIcon))
@@ -2181,13 +2215,44 @@ class VisageVaultApp(QMainWindow):
         self.btn_change_folder.clicked.connect(self._select_drive_folder)
         header_layout.addWidget(self.btn_change_folder)
 
+        # --- NUEVO BOTÓN: VER ÁRBOL ---
+        self.btn_show_tree = QPushButton("Ver árbol de directorios")
+        self.btn_show_tree.setCheckable(True) # Funciona como interruptor On/Off
+        self.btn_show_tree.setVisible(False)  # Oculto hasta iniciar sesión
+        self.btn_show_tree.clicked.connect(self._toggle_drive_folder_tree)
+        header_layout.addWidget(self.btn_show_tree)
+        # ------------------------------
+
         header_layout.addStretch() # Empujar botones a la izquierda
         cloud_layout.addLayout(header_layout)
 
-        # 2. Splitter Principal (Igual que en Fotos: Árbol a la derecha, Fotos a la izquierda)
+        # 2. Splitter Principal (Árbol Carpetas | Fotos | Árbol Fechas)
         self.cloud_splitter = QSplitter(Qt.Horizontal)
 
-        # --- PANEL IZQUIERDO: Área de Scroll para las Fotos ---
+        # --- NUEVO PANEL IZQUIERDO: ÁRBOL DE DIRECTORIOS ---
+        self.cloud_folder_panel = QWidget()
+        folder_panel_layout = QVBoxLayout(self.cloud_folder_panel)
+        folder_panel_layout.setContentsMargins(0, 0, 0, 0)
+
+        folder_label = QLabel("Subcarpetas:")
+        folder_label.setStyleSheet("font-weight: bold; color: #3daee9; padding: 5px;")
+        folder_panel_layout.addWidget(folder_label)
+
+        self.cloud_folder_tree = QTreeWidget()
+        self.cloud_folder_tree.setHeaderHidden(True)
+        # Conectamos la expansión para carga perezosa (lazy loading)
+        self.cloud_folder_tree.itemExpanded.connect(self._on_folder_tree_item_expanded)
+
+        self.cloud_folder_tree.itemClicked.connect(self._on_folder_tree_item_clicked)
+
+        folder_panel_layout.addWidget(self.cloud_folder_tree)
+
+        # Lo añadimos al splitter y lo ocultamos por defecto (se activa con el botón)
+        self.cloud_splitter.addWidget(self.cloud_folder_panel)
+        self.cloud_folder_panel.hide()
+        # ---------------------------------------------------
+
+        # --- PANEL CENTRAL: Área de Scroll para las Fotos ---
         cloud_area_widget = QWidget()
         self.cloud_container_layout = QVBoxLayout(cloud_area_widget)
         self.cloud_container_layout.setSpacing(0)
@@ -2212,7 +2277,9 @@ class VisageVaultApp(QMainWindow):
         cloud_right_layout.addWidget(self.cloud_date_tree)
 
         self.cloud_splitter.addWidget(cloud_right_panel)
-        self.cloud_splitter.setSizes([800, 200]) # Tamaño inicial
+
+        # Ajustar tamaños iniciales (20% árbol, 60% fotos, 20% fechas)
+        self.cloud_splitter.setSizes([200, 600, 200])
 
         cloud_layout.addWidget(self.cloud_splitter)
 
@@ -2641,12 +2708,136 @@ class VisageVaultApp(QMainWindow):
     # --- FIN DE LAS NUEVAS FUNCIONES DE DISPLAY ---
 
     # ----------------------------------------------------------------
+    # MENÚ CONTEXTUAL ESPECÍFICO PARA DRIVE
+    # ----------------------------------------------------------------
+    def _on_drive_context_menu(self, pos, list_widget):
+        """
+        Menú clic derecho para elementos de la Nube.
+        MODIFICADO: Busca selecciones en TODOS los meses.
+        """
+        # 1. BÚSQUEDA GLOBAL DE SELECCIÓN EN LA NUBE
+        container = list_widget.parent()
+        selected_items = []
+
+        if container:
+            for lw in container.findChildren(PreviewListWidget):
+                selected_items.extend(lw.selectedItems())
+        else:
+            selected_items = list_widget.selectedItems()
+
+        if not selected_items:
+            return
+
+        menu = QMenu(self)
+
+        # Informativo
+        count = len(selected_items)
+        header = menu.addAction(f"{count} foto(s) seleccionada(s)")
+        header.setEnabled(False)
+        menu.addSeparator()
+
+        # Opción: Cambiar Fecha
+        action_date = menu.addAction("Cambiar Fecha (Localmente)")
+        action_date.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+
+        action = menu.exec(list_widget.mapToGlobal(pos))
+
+        if action == action_date:
+            # Pasamos la lista acumulada de todos los meses
+            self._change_date_for_drive_items(selected_items)
+
+    def _change_date_for_drive_items(self, items):
+        """
+        Abre el diálogo UNA sola vez y aplica la fecha a TODAS las fotos seleccionadas de Drive.
+        """
+        if not items: return
+
+        # 1. Abrir diálogo (Solo una vez para todo el grupo)
+        dialog = DateChangeDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            new_year, new_month = dialog.get_data()
+
+            # Fecha ISO ficticia para ordenar: YYYY-MM-01T12:00...
+            new_iso_date = f"{new_year}-{new_month}-01T12:00:00.000Z"
+
+            count = 0
+            total = len(items)
+
+            self._set_status(f"Actualizando fecha de {total} elementos en la nube (localmente)...")
+
+            # 2. Iterar sobre TODOS los elementos seleccionados
+            for i, item in enumerate(items):
+                try:
+                    data = item.data(Qt.UserRole)
+                    if not data: continue
+
+                    file_id = data['id']
+
+                    # Actualizar DB
+                    self.db.update_drive_photo_date(file_id, new_iso_date)
+
+                    # Actualizar estructura en Memoria (RAM) para que el cambio sea instantáneo
+                    # Buscamos y eliminamos la foto de su fecha antigua
+                    found = False
+                    for y, months in self.drive_photos_by_date.items():
+                        for m, photos in months.items():
+                            # photos es una lista de diccionarios
+                            for p in photos:
+                                if p['id'] == file_id:
+                                    # Actualizamos la fecha en el objeto en memoria
+                                    p['createdTime'] = new_iso_date
+
+                                    # La quitamos de la lista vieja
+                                    photos.remove(p)
+
+                                    # La añadimos a la lista nueva (creando claves si faltan)
+                                    if new_year not in self.drive_photos_by_date:
+                                        self.drive_photos_by_date[new_year] = {}
+                                    if new_month not in self.drive_photos_by_date[new_year]:
+                                        self.drive_photos_by_date[new_year][new_month] = []
+
+                                    self.drive_photos_by_date[new_year][new_month].append(p)
+                                    found = True
+                                    break
+                            if found: break
+                        if found: break
+
+                    count += 1
+
+                except Exception as e:
+                    print(f"Error actualizando item {i}: {e}")
+
+            self._set_status(f"Fecha actualizada para {count} fotos. Reorganizando vista...")
+
+            # 3. Recargar la vista completa para reflejar los movimientos
+            # Forzamos la limpieza visual y el redibujado
+            self.cloud_scroll_area.setUpdatesEnabled(False)
+            self._display_cloud_photos()
+            self.cloud_scroll_area.setUpdatesEnabled(True)
+
+    # ----------------------------------------------------------------
     # LÓGICA DE MENÚ CONTEXTUAL Y GESTIÓN DE ARCHIVOS
     # ----------------------------------------------------------------
 
     def _on_context_menu(self, pos, list_widget, is_video, is_hidden_view=False):
-        """Muestra el menú contextual con opción de cambio de fecha y ojos rojos."""
-        selected_items = list_widget.selectedItems()
+        """
+        Muestra el menú contextual.
+        MODIFICADO: Busca elementos seleccionados en TODAS las listas (meses) visibles,
+        no solo en la que se hizo clic.
+        """
+        # 1. BÚSQUEDA GLOBAL DE SELECCIÓN
+        # Obtenemos el contenedor padre (el área de scroll)
+        container = list_widget.parent()
+        selected_items = []
+
+        if container:
+            # Buscamos en todas las listas de meses que haya en el panel
+            for lw in container.findChildren(PreviewListWidget):
+                selected_items.extend(lw.selectedItems())
+        else:
+            # Fallback por si algo falla
+            selected_items = list_widget.selectedItems()
+
         if not selected_items:
             return
 
@@ -2668,6 +2859,11 @@ class VisageVaultApp(QMainWindow):
                 self._delete_selected_media(selected_items, is_video, from_hidden_view=True)
         else:
             # --- OPCIONES NORMALES ---
+            # Mostramos cuántos elementos vamos a editar para dar feedback al usuario
+            count = len(selected_items)
+            header = menu.addAction(f"{count} elemento(s) seleccionado(s)")
+            header.setEnabled(False) # Solo texto informativo
+            menu.addSeparator()
 
             # 1. Cambiar Fecha
             action_date = menu.addAction("Cambiar Fecha (Mover)")
@@ -2677,7 +2873,6 @@ class VisageVaultApp(QMainWindow):
             action_redeye = None
             if not is_video:
                 action_redeye = menu.addAction("Corregir Ojos Rojos (Auto)")
-                # No hay un icono estándar perfecto, usamos uno genérico o DialogApply
                 action_redeye.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
 
             menu.addSeparator()
@@ -2689,6 +2884,7 @@ class VisageVaultApp(QMainWindow):
 
             action = menu.exec(list_widget.mapToGlobal(pos))
 
+            # Pasamos la lista GLOBAL (selected_items) a las funciones
             if action == action_hide:
                 self._hide_selected_media(selected_items, is_video)
             elif action == action_delete:
@@ -2888,30 +3084,34 @@ class VisageVaultApp(QMainWindow):
             print(f"Error general actualizando fichero físico {filepath}: {e}")
 
     def _change_date_for_selected(self, items, is_video):
-        """Abre diálogo para cambiar fecha y ACTUALIZA ARCHIVOS FÍSICOS."""
+        """
+        Cambia la fecha de TODOS los elementos locales seleccionados (Disco + DB).
+        """
+        if not items: return
+
+        # 1. Abrir diálogo UNA vez
         dialog = DateChangeDialog(self)
         if dialog.exec() == QDialog.Accepted:
             new_year, new_month = dialog.get_data()
 
             count = 0
+            total = len(items)
             paths_to_update = [item.data(Qt.UserRole) for item in items]
 
-            # Barra de progreso en el status (opcional, pero útil si son muchos)
-            total = len(paths_to_update)
+            self._set_status(f"Procesando cambio de fecha para {total} archivos...")
 
+            # 2. Iterar y aplicar cambios
             for i, path in enumerate(paths_to_update):
                 try:
-                    self._set_status(f"Procesando ({i+1}/{total}): {Path(path).name}")
-
-                    # --- NUEVO: ACTUALIZAR EL ARCHIVO FÍSICO ---
+                    # A) Actualizar archivo FÍSICO (Metadatos + Fecha Modificación)
                     self._update_file_metadata_on_disk(path, new_year, new_month)
-                    # -------------------------------------------
 
-                    # 1. Actualizar Base de Datos
+                    # B) Actualizar Base de Datos y Memoria
                     if is_video:
                         self.db.update_video_date(path, new_year, new_month)
-                        self._remove_from_memory_struct(path, self.videos_by_year_month)
 
+                        # Mover en memoria (Vídeos)
+                        self._remove_from_memory_struct(path, self.videos_by_year_month)
                         if new_year not in self.videos_by_year_month:
                             self.videos_by_year_month[new_year] = {}
                         if new_month not in self.videos_by_year_month[new_year]:
@@ -2920,8 +3120,9 @@ class VisageVaultApp(QMainWindow):
 
                     else:
                         self.db.update_photo_date(path, new_year, new_month)
-                        self._remove_from_memory_struct(path, self.photos_by_year_month)
 
+                        # Mover en memoria (Fotos)
+                        self._remove_from_memory_struct(path, self.photos_by_year_month)
                         if new_year not in self.photos_by_year_month:
                             self.photos_by_year_month[new_year] = {}
                         if new_month not in self.photos_by_year_month[new_year]:
@@ -2929,16 +3130,25 @@ class VisageVaultApp(QMainWindow):
                         self.photos_by_year_month[new_year][new_month].append(path)
 
                     count += 1
+
+                    # Actualizar estado cada 10 fotos para no saturar
+                    if i % 10 == 0:
+                        self._set_status(f"Actualizando fecha ({i+1}/{total})...")
+
                 except Exception as e:
                     print(f"Error actualizando fecha de {path}: {e}")
 
-            self._set_status(f"Fecha actualizada (BD y Archivos) para {count} elementos. Refrescando...")
+            self._set_status(f"Fecha cambiada correctamente en {count} archivos. Refrescando...")
 
-            # 3. Refrescar la vista
+            # 3. Refrescar la vista correspondiente
             if is_video:
+                self.video_scroll_area.setUpdatesEnabled(False)
                 self._display_videos()
+                self.video_scroll_area.setUpdatesEnabled(True)
             else:
+                self.scroll_area.setUpdatesEnabled(False)
                 self._display_photos()
+                self.scroll_area.setUpdatesEnabled(True)
 
     def _delete_selected_media(self, items, is_video, from_hidden_view=False):
         """Elimina físicamente los archivos y de la BD."""
@@ -4326,32 +4536,163 @@ class VisageVaultApp(QMainWindow):
 
     @Slot()
     def _on_gdrive_login_click(self):
+        """Gestiona tanto Conectar como Desconectar."""
+
+        # CASO 1: DESCONECTAR (LOGOUT)
+        if self.is_drive_connected:
+            self._perform_logout()
+            return
+
+        # CASO 2: CONECTAR (LOGIN)
         self.btn_gdrive.setEnabled(False)
         self.btn_gdrive.setText("Esperando navegador...")
-        self._set_status("Abriendo navegador para inicio de sesión en Google...")
+        self._set_status("Abriendo navegador para inicio de sesión...")
 
-        # Crear worker y thread de Qt
         self.drive_login_thread = QThread()
         self.drive_login_worker = DriveLoginWorker()
         self.drive_login_worker.moveToThread(self.drive_login_thread)
 
-        # Conectar señales
         self.drive_login_thread.started.connect(self.drive_login_worker.run)
         self.drive_login_worker.login_success.connect(self._on_login_success_with_service)
         self.drive_login_worker.login_failed.connect(self._on_login_failure)
 
-        # Limpieza
         self.drive_login_worker.finished.connect(self.drive_login_thread.quit)
         self.drive_login_worker.finished.connect(self.drive_login_worker.deleteLater)
         self.drive_login_thread.finished.connect(lambda: setattr(self, 'drive_login_thread', None))
 
         self.drive_login_thread.start()
 
+    def _perform_logout(self):
+        """
+        Cierra sesión y realiza un BORRADO TOTAL de datos locales, caché e interfaz.
+        """
+        # 1. LOGOUT LÓGICO (Token)
+        from drive_auth import DriveAuthenticator
+        auth = DriveAuthenticator()
+        if auth.logout():
+            self._set_status("Sesión cerrada. Iniciando limpieza profunda...")
+        else:
+            self._set_status("Desconectado. Limpiando datos...")
+
+        # 2. PARAR CUALQUIER PROCESO DE FONDO
+        self._stop_cloud_operations()
+
+        # 3. BORRADO DE BASE DE DATOS
+        try:
+            # Intentamos usar el método dedicado si existe
+            if hasattr(self.db, 'clear_drive_data'):
+                self.db.clear_drive_data()
+            else:
+                # Fallback manual
+                with self.db.conn:
+                    self.db.conn.execute("DELETE FROM drive_photos")
+            print("Base de datos de Drive vaciada.")
+        except Exception as e:
+            print(f"Error limpiando DB: {e}")
+
+        # 4. BORRADO FÍSICO (CACHÉ DE DISCO)
+        # Definimos las rutas exactas
+        cache_snapshot = os.path.join(self.root_cache, "drive_snapshot_cache")
+        cache_full = os.path.join(self.root_cache, "drive_cache")
+
+        for folder_path in [cache_snapshot, cache_full]:
+            if os.path.exists(folder_path):
+                try:
+                    # Borramos la carpeta ENTERA y su contenido
+                    shutil.rmtree(folder_path)
+                    # La volvemos a crear vacía inmediatamente para evitar errores futuros
+                    os.makedirs(folder_path)
+                    print(f"Caché purgado y regenerado: {folder_path}")
+                except Exception as e:
+                    print(f"Error purgado caché {folder_path}: {e}")
+
+        # 5. LIMPIEZA DE MEMORIA (RAM)
+        self.is_drive_connected = False
+        self.drive_service = None
+        self.drive_manager = None
+        self.current_drive_folder_id = None
+        self.drive_photos_by_date = {} # ¡VITAL! Vaciar el diccionario de fotos
+        self.drive_loaded_ids = set()
+        self.cloud_photo_count = 0
+
+        # 6. LIMPIEZA VISUAL (INTERFAZ) - ELIMINACIÓN AGRESIVA
+
+        # A) Limpiar el árbol de fechas lateral
+        self.cloud_date_tree.clear()
+
+        # B) Limpiar el panel de fotos (Layout)
+        # Usamos un bucle while para asegurar que no queda NADA
+        while self.cloud_container_layout.count() > 0:
+            item = self.cloud_container_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.setParent(None) # Desvincular totalmente
+                widget.deleteLater()   # Programar destrucción
+
+        # C) Forzar repintado de la zona
+        self.cloud_scroll_area.update()
+        self.btn_show_tree.setVisible(False)
+        self.btn_show_tree.setChecked(False)
+        self.cloud_folder_panel.hide()
+        self.cloud_folder_tree.clear()
+
+        # 7. RESTAURAR ESTADO INICIAL DEL BOTÓN
+        self.btn_gdrive.setText("Iniciar sesión con Google")
+        self.btn_gdrive.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DriveNetIcon))
+        self.btn_gdrive.setStyleSheet("") # Quitar estilo verde
+        self.btn_gdrive.setEnabled(True)
+
+        self.btn_change_folder.setVisible(False)
+
+        self._set_status("Desconectado. Todos los datos locales han sido eliminados.")
+
+        # (Opcional) Mensaje emergente
+        QMessageBox.information(self, "Desconectado", "Sesión cerrada y caché eliminado.")
+
     @Slot(object)
     def _on_login_success_with_service(self, service):
-        """Recibe el servicio de Drive y continúa con la configuración."""
+        """
+        Recibe el objeto de conexión (service) desde el hilo de login
+        y pasa el control a la función de éxito principal.
+        """
         self.drive_service = service
+        # Ahora llamamos a la función que activa la interfaz y cambia el botón
         self._on_login_success()
+        # Mostrar el botón del árbol
+        self.btn_show_tree.setVisible(True)
+
+    @Slot()
+    def _on_login_success(self):
+        self._set_status("¡Conectado a Google Drive!")
+        self.is_drive_connected = True  # <--- IMPORTANTE
+
+        # Actualizar botón para que ahora sirva para desconectar
+        self.btn_gdrive.setText("Desconectar de Google") # <--- CAMBIO DE TEXTO
+        self.btn_gdrive.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton))
+        self.btn_gdrive.setEnabled(True)
+        self.btn_gdrive.setStyleSheet("background-color: #34a853; color: white; padding: 12px; font-weight: bold;")
+
+        self.btn_change_folder.setVisible(True)
+        self.btn_show_tree.setVisible(True)
+
+        try:
+            self.drive_manager = DriveManager()
+            self.drive_manager.authenticate() # Esto ahora usará el token cargado
+
+            folder_id = config_manager.get_drive_folder_id()
+
+            if folder_id:
+                self._set_status(f"Sincronizando carpeta guardada automáticamente...")
+                # Lanzamos escaneo directo (ya optimizado)
+                self._scan_drive_content(folder_id)
+            else:
+                self._select_drive_folder()
+
+        except Exception as e:
+            print(f"Error post-login: {e}")
+            self._set_status(f"Error inicializando Drive: {e}")
+            # Si falla la inicialización, forzamos logout visual
+            self._perform_logout()
 
     @Slot(str)
     def _on_login_failure(self, error_message=None):
@@ -4377,40 +4718,6 @@ class VisageVaultApp(QMainWindow):
         except Exception as e:
             print(f"Error de Login con Google: {e}")
             QTimer.singleShot(0, self._on_login_failure)
-
-    @Slot()
-    def _on_login_success(self):
-        self._set_status("¡Conectado a Google Drive!")
-
-        # Actualizar botón de conexión
-        self.btn_gdrive.setText("Conectado ✅")
-        self.btn_gdrive.setEnabled(False)
-        self.btn_gdrive.setStyleSheet("background-color: #34a853; color: white; padding: 12px; font-weight: bold;")
-
-        self.btn_change_folder.setVisible(True)
-
-        # Inicializar el Manager real para usar la API
-        try:
-            self.drive_manager = DriveManager()
-            self.drive_manager.authenticate()
-
-            # Verificar si ya tenemos carpeta configurada
-            folder_id = config_manager.get_drive_folder_id()
-
-            if folder_id:
-                self._set_status(f"Escaneando carpeta guardada...")
-
-                # --- CORRECCIÓN CRÍTICA: LLAMADA DIRECTA (NO THREADING) ---
-                # _scan_drive_content YA gestiona sus propios hilos internamente.
-                # Al llamarla directo, permitimos que _load_drive_from_db pinte la UI sin crashear.
-                self._scan_drive_content(folder_id)
-                # ----------------------------------------------------------
-            else:
-                self._select_drive_folder()
-
-        except Exception as e:
-            print(f"Error post-login: {e}")
-            self._set_status(f"Error inicializando Drive: {e}")
 
     def _select_drive_folder(self):
         """Abre el navegador de carpetas de Drive."""
@@ -4439,10 +4746,22 @@ class VisageVaultApp(QMainWindow):
 
                 # Guardar configuración
                 config_manager.set_drive_folder_id(folder_id)
+
+                # Actualizar referencia actual
+                self.current_drive_folder_id = folder_id
+                self.current_drive_folder_name = folder_name
+
                 self.btn_change_folder.setVisible(True)
                 self.btn_change_folder.setText(f"Carpeta: {folder_name} (Cambiar)")
 
                 self._set_status(f"Cambiando a carpeta: {folder_name}...")
+
+                # --- ACTUALIZAR EL ÁRBOL DE CARPETAS ---
+                self.cloud_folder_tree.clear() # Borrar árbol viejo
+
+                # Si el panel está visible, cargamos la nueva raíz inmediatamente
+                if self.btn_show_tree.isChecked():
+                    self._load_folder_tree_root()
 
                 # 3. INICIAR NUEVO ESCANEO
                 self._scan_drive_content(folder_id)
@@ -4529,6 +4848,8 @@ class VisageVaultApp(QMainWindow):
         self.drive_scan_thread = QThread()
         self.drive_scan_worker = DriveScanWorker(folder_id, self.db.db_path)
         self.drive_scan_worker.moveToThread(self.drive_scan_thread)
+
+        self.set_drive_priority_low.connect(self.drive_scan_worker.set_slow_mode)
 
         self.drive_scan_thread.started.connect(self.drive_scan_worker.run)
 
@@ -4618,6 +4939,15 @@ class VisageVaultApp(QMainWindow):
                 list_widget.setMovement(QListWidget.Static)
                 list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
                 list_widget.setSpacing(20) # Mismo espaciado que Fotos
+
+                # ===============================================================
+                # ### --- AÑADIDO: MENÚ CONTEXTUAL PARA DRIVE ---
+                # ===============================================================
+                list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+                list_widget.customContextMenuRequested.connect(
+                    lambda pos, lw=list_widget: self._on_drive_context_menu(pos, lw)
+                )
+                # ===============================================================
 
                 # Configuración visual: SIN CSS MANUAL para usar el tema del sistema
                 list_widget.setViewMode(QListWidget.IconMode)
@@ -4794,6 +5124,188 @@ class VisageVaultApp(QMainWindow):
                 # No pasa nada, simplemente lo ignoramos.
                 print("Aviso: El hilo anterior ya estaba eliminado.")
                 self.drive_scan_thread = None
+
+    def _check_auto_login(self):
+        """Intenta conectar automáticamente si hay credenciales guardadas."""
+        from drive_auth import DriveAuthenticator
+        auth = DriveAuthenticator()
+
+        if auth.has_credentials():
+            self._set_status("Detectada sesión de Google anterior. Conectando...")
+            # Intentamos obtener el servicio en modo silencioso (sin abrir navegador)
+            service = auth.get_service(silent=True)
+
+            if service:
+                self.drive_service = service
+                self._on_login_success()
+            else:
+                self._set_status("La sesión de Google caducó. Por favor, conecta de nuevo.")
+
+    # --- LÓGICA DEL ÁRBOL DE DIRECTORIOS ---
+
+    @Slot()
+    def _toggle_drive_folder_tree(self):
+        """Muestra u oculta el panel lateral de carpetas."""
+        is_visible = self.btn_show_tree.isChecked()
+        self.cloud_folder_panel.setVisible(is_visible)
+
+        if is_visible:
+            # Si lo abrimos y está vacío, cargamos la raíz
+            if self.cloud_folder_tree.topLevelItemCount() == 0:
+                self._load_folder_tree_root()
+
+    def _load_folder_tree_root(self):
+        """
+        Carga la Carpeta Raíz como primer elemento del árbol.
+        """
+        if not self.current_drive_folder_id:
+            return
+
+        self.cloud_folder_tree.clear()
+
+        # 1. Crear el elemento RAÍZ manualmente
+        root_name = getattr(self, 'current_drive_folder_name', 'Carpeta Raíz')
+        root_item = QTreeWidgetItem(self.cloud_folder_tree, [root_name])
+        root_item.setData(0, Qt.UserRole, self.current_drive_folder_id)
+        root_item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_DriveHDIcon))
+        root_item.setExpanded(True) # Lo mostramos abierto
+
+        # 2. Lanzar worker para cargar SUS hijos (las subcarpetas) dentro de este item
+        self._launch_folder_loader(self.current_drive_folder_id, root_item)
+
+    def _launch_folder_loader(self, folder_id, parent_item):
+        """Crea y lanza el hilo para buscar carpetas."""
+
+        # 1. ¡SEMÁFORO ROJO! Decimos al descargador de fotos que se calme
+        self.set_drive_priority_low.emit(True)
+
+        thread = QThread()
+        worker = FolderLoaderWorker(folder_id, parent_item)
+        worker.moveToThread(thread)
+
+        self.active_folder_threads.append((thread, worker))
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_folders_loaded)
+
+        def cleanup():
+            if (thread, worker) in self.active_folder_threads:
+                self.active_folder_threads.remove((thread, worker))
+            thread.quit()
+            worker.deleteLater()
+            thread.deleteLater()
+
+        worker.finished.connect(cleanup)
+        thread.start()
+
+    @Slot(list, QTreeWidgetItem)
+    def _on_folders_loaded(self, folders, parent_item):
+        """Recibe la lista de carpetas y actualiza el árbol."""
+
+        self.set_drive_priority_low.emit(False)
+
+        # Si parent_item es Root (invisible), limpiamos el mensaje de "Cargando..." si lo hubiera
+        if parent_item == self.cloud_folder_tree.invisibleRootItem():
+             self.cloud_folder_tree.clear()
+        else:
+            # Quitar el item dummy "Cargando..."
+            if parent_item.childCount() > 0:
+                parent_item.removeChild(parent_item.child(0))
+
+        if not folders:
+            if parent_item == self.cloud_folder_tree.invisibleRootItem():
+                 no_item = QTreeWidgetItem(self.cloud_folder_tree, ["(Sin subcarpetas)"])
+                 no_item.setFlags(Qt.NoItemFlags)
+            return
+
+        for f in folders:
+            item = QTreeWidgetItem(parent_item, [f['name']])
+            item.setData(0, Qt.UserRole, f['id'])
+            item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon))
+
+            # TRUCO: Añadimos un hijo dummy para que aparezca la flechita de expansión
+            # (Lazy Loading: solo cargaremos sus hijos reales si el usuario expande)
+            dummy = QTreeWidgetItem(item, ["Cargando..."])
+
+        self.cloud_folder_tree.expandItem(parent_item)
+
+    @Slot(QTreeWidgetItem)
+    def _on_folder_tree_item_expanded(self, item):
+        """Se llama al hacer clic en la flechita de expansión."""
+        # Si tiene un solo hijo y es el dummy "Cargando...", procedemos a cargar
+        if item.childCount() == 1 and item.child(0).text(0) == "Cargando...":
+            folder_id = item.data(0, Qt.UserRole)
+            if folder_id:
+                self._launch_folder_loader(folder_id, item)
+
+    @Slot(QTreeWidgetItem, int)
+    def _on_folder_tree_item_clicked(self, item, column):
+        """
+        Gestiona la navegación:
+        - Si es la Raíz -> Muestra TODO (Recursivo).
+        - Si es Subcarpeta -> Muestra solo contenido de esa carpeta.
+        """
+        folder_id = item.data(0, Qt.UserRole)
+        folder_name = item.text(0)
+
+        if not folder_id:
+            return
+
+        # CASO 1: Hemos pulsado la Carpeta Raíz (Volver al inicio)
+        if folder_id == self.current_drive_folder_id:
+            self._set_status(f"Mostrando vista completa: {folder_name}")
+
+            # Usamos la función original que carga TODO basado en el root_folder_id
+            # Esto recupera todas las fotos recursivamente
+            self._load_drive_from_db(self.current_drive_folder_id)
+
+            # Forzamos repintado
+            self.cloud_scroll_area.setUpdatesEnabled(False)
+            self._display_cloud_photos()
+            self.cloud_scroll_area.setUpdatesEnabled(True)
+            return
+
+        # CASO 2: Hemos pulsado una Subcarpeta
+        self._set_status(f"Filtrando carpeta: {folder_name}...")
+        self._load_specific_folder_view(folder_id)
+
+    def _load_specific_folder_view(self, target_folder_id):
+        """
+        Carga en memoria y muestra SOLO las fotos de la carpeta indicada.
+        """
+        # 1. Obtener fotos filtradas de la DB
+        db_photos = self.db.get_drive_photos_by_parent(target_folder_id)
+
+        # Si no hay fotos en la DB todavía (quizás el scanner no llegó), avisamos visualmente
+        # pero NO borramos la pantalla si está vacía para no flashear, a menos que sea necesario.
+
+        # 2. Limpiar estructuras de memoria
+        self.drive_photos_by_date = {}
+        self.drive_loaded_ids = set()
+        self.cloud_photo_count = 0
+
+        # 3. Formatear datos (Igual que en _load_drive_from_db)
+        formatted_photos = []
+        for row in db_photos:
+            formatted_photos.append({
+                'id': row['id'],
+                'name': row['name'],
+                'createdTime': row['created_time'],
+                'mimeType': row['mime_type'],
+                'thumbnailLink': row['thumbnail_link'],
+                'webContentLink': row['web_content_link']
+            })
+
+        # 4. Clasificar en memoria (Fechas)
+        self._classify_drive_items_in_memory(formatted_photos)
+
+        # 5. Redibujar la interfaz
+        # Congelamos actualizaciones visuales para que sea instantáneo
+        self.cloud_scroll_area.setUpdatesEnabled(False)
+        self._display_cloud_photos()
+        self.cloud_scroll_area.setUpdatesEnabled(True)
+
+        self._set_status(f"Mostrando {self.cloud_photo_count} fotos de esta carpeta.")
 
 def run_visagevault():
     """Función para iniciar la aplicación gráfica."""

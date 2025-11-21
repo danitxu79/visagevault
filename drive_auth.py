@@ -13,50 +13,74 @@ SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 class DriveAuthenticator:
     def __init__(self):
         self.creds = None
-        # Ruta donde guardaremos la sesión del usuario para no pedirla siempre
         self.token_path = os.path.join(os.path.dirname(__file__), 'user_token.pickle')
-        # Tu archivo maestro (que el usuario no toca)
         self.secrets_path = resource_path('client_secrets.json')
 
-    def get_service(self):
-        """Intenta loguear silenciosamente, o abre navegador si hace falta."""
+    def has_credentials(self):
+        """Verifica si existe el archivo de token."""
+        return os.path.exists(self.token_path)
 
-        # 1. Cargar sesión guardada si existe
+    def logout(self):
+        """Cierra sesión borrando el token local."""
+        self.creds = None
         if os.path.exists(self.token_path):
-            with open(self.token_path, 'rb') as token:
-                self.creds = pickle.load(token)
+            try:
+                os.remove(self.token_path)
+                return True
+            except Exception as e:
+                print(f"Error borrando token: {e}")
+                return False
+        return True
 
-        # 2. Si no hay credenciales válidas, hacemos el login visual
+    def get_service(self, silent=False):
+        """
+        Obtiene el servicio de Drive.
+        Si silent=True, NO abrirá el navegador si el token es inválido,
+        simplemente devolverá None.
+        """
+        # 1. Cargar sesión guardada
+        if os.path.exists(self.token_path):
+            try:
+                with open(self.token_path, 'rb') as token:
+                    self.creds = pickle.load(token)
+            except Exception:
+                self.creds = None
+
+        # 2. Validar credenciales
         if not self.creds or not self.creds.valid:
             if self.creds and self.creds.expired and self.creds.refresh_token:
                 try:
-                    # Intenta refrescar el token sin abrir el navegador
                     self.creds.refresh(Request())
                 except Exception:
-                    self._start_browser_login()
+                    self.creds = None
             else:
+                self.creds = None
+
+        # 3. Si no hay credenciales válidas:
+        if not self.creds:
+            if silent:
+                # Si es modo silencioso (arranque), no hacemos nada más
+                return None
+            else:
+                # Si NO es silencioso (botón conectar), abrimos navegador
                 self._start_browser_login()
 
-            # 3. Guardar la sesión para la próxima vez
+        # Guardar token refrescado o nuevo
+        if self.creds and self.creds.valid:
             with open(self.token_path, 'wb') as token:
                 pickle.dump(self.creds, token)
+            return build('drive', 'v3', credentials=self.creds)
 
-        # 4. Retornar el servicio listo para usar
-        return build('drive', 'v3', credentials=self.creds)
+        return None
 
     def _start_browser_login(self):
-        """Lanza el flujo de 'Logueate con Google' en el navegador."""
         if not os.path.exists(self.secrets_path):
-            raise FileNotFoundError("Falta el archivo de configuración interna (client_secrets.json).")
+            raise FileNotFoundError("Falta client_secrets.json")
 
-        flow = InstalledAppFlow.from_client_secrets_file(
-            self.secrets_path, SCOPES)
-
-        # CAMBIO CLAVE: Especificar success_message para asegurar que el usuario vea que acabó
-        # y el servidor sepa que debe cerrarse.
+        flow = InstalledAppFlow.from_client_secrets_file(self.secrets_path, SCOPES)
         self.creds = flow.run_local_server(
             port=0,
-            success_message='La autenticación se ha completado. Puedes cerrar esta ventana.'
+            success_message='Autenticación completada. Puedes cerrar esta ventana.'
         )
 
 
