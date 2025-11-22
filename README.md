@@ -8,7 +8,7 @@
 
 ---
 
-## ✨ Novedades de la Versión 1.5 (Nube y Optimización)
+## ✨ Novedades de la Versión
 
 Esta actualización transforma VisageVault en un gestor híbrido (Local + Nube) y mejora la estructura interna:
 
@@ -22,6 +22,9 @@ Esta actualización transforma VisageVault en un gestor híbrido (Local + Nube) 
     * **Cierre Rápido:** Tecla `ESC` para cerrar vistas previas.
     * **Filtro de Carpetas Propias:** Algoritmo inteligente para encontrar tu carpeta "Mi Ordenador" en Drive filtrando carpetas compartidas no deseadas.
 * **🖱️ Interacción Unificada:** La selección múltiple, el zoom con `Ctrl`+`Rueda` y la navegación funcionan idéntico en Local y Nube.
+* Añadido buscador de fotografías duplicadas
+* Añadido caja fuerte
+
 
 ---
 
