@@ -1,6 +1,6 @@
 # ==============================================================================
 # PROYECTO: VisageVault - Gestor de Fotografías Inteligente
-# VERSIÓN: 1.6
+# VERSIÓN: 1.6.1
 # DERECHOS DE AUTOR: © 2025 Daniel Serrano Armenta
 # ==============================================================================
 #
@@ -71,7 +71,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QPixmap, QIcon, QCursor, QTransform, QPainter, QPaintEvent,
-    QPainterPath, QKeyEvent, QDesktopServices, QImage
+    QPainterPath, QKeyEvent, QDesktopServices, QImage, QColor, QPen, QBrush
 )
 
 # --- MODIFICADO: Importar las funciones de foto Y vídeo ---
@@ -93,6 +93,7 @@ from PIL import Image
 import ast
 import pickle
 import shutil
+import hashlib
 
 def resource_path(relative_path):
     """Obtiene la ruta absoluta al recurso tanto en PyInstaller como en desarrollo."""
@@ -1869,46 +1870,89 @@ class PhotoDirWatcher(QObject):
             self.signal.emit()
 
 # =================================================================
-# GESTOR DE ENCRIPTACIÓN Y CAJA FUERTE
+# GESTOR DE ENCRIPTACIÓN Y CAJA FUERTE (ACTUALIZADO)
 # =================================================================
 class CryptoManager:
-    """Maneja la encriptación XOR simple basada en la contraseña."""
+    """
+    Maneja la encriptación XOR usando Numpy para máxima velocidad.
+    Procesa archivos grandes (vídeos) en fracciones de segundo.
+    """
 
     SAFE_DIR = Path("visagevault_safe")
 
     @staticmethod
     def get_key_from_password(password):
-        # Genera una clave de bytes a partir de la contraseña
-        return hashlib.sha256(password.encode()).digest()
+        if not password: return b'default_key'
+        return hashlib.sha256(password.encode()).digest() # 32 bytes
 
     @staticmethod
     def process_file(input_path, output_path, password, encrypt=True):
-        """
-        Encripta o desencripta un archivo usando XOR.
-        Al ser XOR, la operación es simétrica (se usa la misma función).
-        """
-        key = CryptoManager.get_key_from_password(password)
-        key_len = len(key)
-
+        """Encripta o desencripta de DISCO a DISCO usando Numpy."""
         # Asegurar directorio destino
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        if output_path:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+        key_bytes = CryptoManager.get_key_from_password(password)
+
+        # Convertir clave a array uint8 una sola vez
+        key_arr = np.frombuffer(key_bytes, dtype=np.uint8)
+
+        # Usamos un chunk grande (4MB) para velocidad de disco
+        # 4MB es múltiplo de 32 bytes (tamaño clave), así que la alineación es perfecta
+        CHUNK_SIZE = 4 * 1024 * 1024
+
+        # Pre-creamos un array de clave gigante para hacer XOR directo con el chunk
+        # Esto evita redimensionar la clave en cada vuelta del bucle
+        full_key_tile = np.resize(key_arr, CHUNK_SIZE)
 
         with open(input_path, 'rb') as f_in, open(output_path, 'wb') as f_out:
-            chunk_size = 64 * 1024 # 64KB chunks
-            i = 0
             while True:
-                chunk = f_in.read(chunk_size)
+                chunk = f_in.read(CHUNK_SIZE)
                 if not chunk: break
 
-                # Transformar chunk
-                # Nota: Esto es Python puro, para archivos gigantes (videos 4K) puede tardar un poco,
-                # pero evita dependencias externas.
-                output = bytearray(chunk)
-                for j in range(len(output)):
-                    output[j] ^= key[(i + j) % key_len]
+                # Convertir chunk a numpy
+                chunk_arr = np.frombuffer(chunk, dtype=np.uint8)
 
-                f_out.write(output)
-                i += len(chunk)
+                # Obtener la parte correspondiente de la clave (por si es el último chunk más pequeño)
+                current_key = full_key_tile[:len(chunk_arr)]
+
+                # --- LA MAGIA: XOR VECTORIZADO (C++ Speed) ---
+                encrypted_arr = np.bitwise_xor(chunk_arr, current_key)
+                # ---------------------------------------------
+
+                # Escribir a disco
+                f_out.write(encrypted_arr.tobytes())
+
+    @staticmethod
+    def decrypt_to_bytes(input_path, password):
+        """Desencripta a MEMORIA (para previsualización) usando Numpy."""
+        if not os.path.exists(input_path): return None
+
+        key_bytes = CryptoManager.get_key_from_password(password)
+        key_arr = np.frombuffer(key_bytes, dtype=np.uint8)
+
+        CHUNK_SIZE = 4 * 1024 * 1024
+        full_key_tile = np.resize(key_arr, CHUNK_SIZE)
+
+        decrypted_data = bytearray()
+
+        try:
+            with open(input_path, 'rb') as f:
+                while True:
+                    chunk = f.read(CHUNK_SIZE)
+                    if not chunk: break
+
+                    chunk_arr = np.frombuffer(chunk, dtype=np.uint8)
+                    current_key = full_key_tile[:len(chunk_arr)]
+
+                    decrypted_arr = np.bitwise_xor(chunk_arr, current_key)
+
+                    decrypted_data.extend(decrypted_arr.tobytes())
+
+            return bytes(decrypted_data)
+        except Exception as e:
+            print(f"Error desencriptando visualización: {e}")
+            return None
 
 # =================================================================
 # DIÁLOGOS DE SEGURIDAD
@@ -2241,6 +2285,120 @@ class DuplicateDialog(QDialog):
 
     def get_deleted_items(self):
         return list(self.deleted_paths)
+
+# =================================================================
+# WORKER PARA MOVER A CAJA FUERTE (Evita congelamientos con vídeos)
+# =================================================================
+class MoveToSafeWorker(QObject):
+    progress = Signal(str)
+    item_finished = Signal(str, bool) # Envía (path, is_video) cuando termina uno
+    finished = Signal()
+
+    def __init__(self, db_path, items_data, password):
+        """
+        items_data: Lista de tuplas [(path, is_video), ...]
+        """
+        super().__init__()
+        self.db_path = db_path
+        self.items_data = items_data
+        self.password = password
+        self.is_running = True
+
+    @Slot()
+    def run(self):
+        # Conexión DB independiente para este hilo
+        local_db = VisageVaultDB(os.path.basename(self.db_path), is_worker=True)
+        local_db.db_path = self.db_path
+        local_db.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        local_db.conn.row_factory = sqlite3.Row
+
+        safe_dir = Path("visagevault_safe")
+        safe_dir.mkdir(exist_ok=True)
+        cache_dir = Path("visagevault_cache") / "local_snapshot_cache"
+
+        total = len(self.items_data)
+
+        for i, (original_path, is_video) in enumerate(self.items_data):
+            if not self.is_running: break
+
+            if not os.path.exists(original_path): continue
+
+            try:
+                filename = Path(original_path).name
+                self.progress.emit(f"Encriptando ({i+1}/{total}): {filename}...")
+
+                # 1. Calcular rutas
+                safe_filename = hashlib.md5(original_path.encode()).hexdigest() + ".enc"
+                encrypted_path = safe_dir / safe_filename
+
+                # 2. Generar THUMBNAIL ENCRIPTADO (Solo Vídeos)
+                if is_video:
+                    # Generar miniatura temporal
+                    thumb_temp_path = generate_video_thumbnail(original_path)
+
+                    if thumb_temp_path and os.path.exists(thumb_temp_path):
+                        encrypted_thumb_path = str(encrypted_path) + ".thumb"
+                        # Encriptar miniatura
+                        CryptoManager.process_file(thumb_temp_path, encrypted_thumb_path, self.password)
+                        # Borrar temporal
+                        os.remove(thumb_temp_path)
+
+                # 3. ENCRIPTAR ARCHIVO PRINCIPAL (Esto es lo que tardaba)
+                CryptoManager.process_file(original_path, encrypted_path, self.password)
+
+                # 4. GUARDAR EN DB
+                year, month = "0000", "00"
+                if is_video:
+                    # Usamos el método de la instancia local
+                    cur = local_db.conn.execute("SELECT year, month FROM videos WHERE filepath = ?", (original_path,))
+                    row = cur.fetchone()
+                    if row: year, month = row['year'], row['month']
+                else:
+                    cur = local_db.conn.execute("SELECT year, month FROM photos WHERE filepath = ?", (original_path,))
+                    row = cur.fetchone()
+                    if row: year, month = row['year'], row['month']
+
+                date_str = f"{year}-{month}"
+                media_type = 'video' if is_video else 'photo'
+
+                # Insertar en tabla safe_files
+                local_db.conn.execute("""
+                    INSERT INTO safe_files (original_path, encrypted_path, media_type, original_date)
+                    VALUES (?, ?, ?, ?)
+                """, (str(original_path), str(encrypted_path), media_type, date_str))
+                local_db.conn.commit()
+
+                # 5. LIMPIEZA (Borrar original y referencias)
+                if is_video:
+                    local_db.conn.execute("DELETE FROM videos WHERE filepath = ?", (original_path,))
+                else:
+                    # Borrar foto y caras asociadas
+                    cur = local_db.conn.execute("SELECT id FROM photos WHERE filepath = ?", (original_path,))
+                    row = cur.fetchone()
+                    if row:
+                        local_db.conn.execute("DELETE FROM faces WHERE photo_id = ?", (row['id'],))
+                    local_db.conn.execute("DELETE FROM photos WHERE filepath = ?", (original_path,))
+
+                local_db.conn.commit()
+
+                # Borrar miniatura de caché pública si existe
+                try:
+                    thumb_hash = hashlib.sha256(str(original_path).encode('utf-8')).hexdigest()
+                    thumb_file = cache_dir / f"{thumb_hash}.jpg"
+                    if thumb_file.exists(): os.remove(thumb_file)
+                except: pass
+
+                # Borrar archivo original del disco
+                os.remove(original_path)
+
+                # Avisar al hilo principal para que actualice la UI
+                self.item_finished.emit(original_path, is_video)
+
+            except Exception as e:
+                print(f"Error en worker safe con {original_path}: {e}")
+
+        local_db.conn.close()
+        self.finished.emit()
 
 # =================================================================
 # VENTANA PRINCIPAL DE LA APLICACIÓN (VisageVaultApp)
@@ -4248,6 +4406,10 @@ class VisageVaultApp(QMainWindow):
             if self.face_scan_thread and self.face_scan_thread.isRunning():
                  self._set_status("Mostrando caras. Escaneo sigue en segundo plano...")
 
+        elif tab_name == "Caja Fuerte":
+            if hasattr(self, 'unlocked_widget') and self.unlocked_widget.isVisible():
+                self._load_safe_content()
+
     def _load_people_list(self):
         self.people_tree_widget.clear()
         unknown_item = QTreeWidgetItem(self.people_tree_widget, ["Caras Sin Asignar"])
@@ -5716,7 +5878,7 @@ class VisageVaultApp(QMainWindow):
     def _setup_safe_tab(self):
         layout = QVBoxLayout(self.safe_tab)
 
-        # ESTADO BLOQUEADO
+        # ESTADO BLOQUEADO (Igual que antes)
         self.locked_widget = QWidget()
         lock_layout = QVBoxLayout(self.locked_widget)
         lock_layout.setAlignment(Qt.AlignCenter)
@@ -5737,30 +5899,34 @@ class VisageVaultApp(QMainWindow):
 
         layout.addWidget(self.locked_widget)
 
-        # ESTADO DESBLOQUEADO (Inicialmente oculto)
+        # ESTADO DESBLOQUEADO (Rediseñado)
         self.unlocked_widget = QWidget()
         self.unlocked_widget.setVisible(False)
         unlock_layout = QVBoxLayout(self.unlocked_widget)
 
         # Barra superior
         top_bar = QHBoxLayout()
-        top_bar.addWidget(QLabel("📂 Archivos Protegidos"))
+        top_bar.addWidget(QLabel("📂 Archivos Protegidos (Desencriptados en memoria)"))
         btn_lock = QPushButton("Bloquear")
         btn_lock.clicked.connect(self._lock_safe)
         top_bar.addWidget(btn_lock, 0, Qt.AlignRight)
         unlock_layout.addLayout(top_bar)
 
-        # Grid de fotos
+        # Área de scroll (Igual que la pestaña fotos)
         self.safe_scroll = QScrollArea()
         self.safe_scroll.setWidgetResizable(True)
+
+        # Contenedor interno VERTICAL (antes era Grid)
         self.safe_container = QWidget()
-        self.safe_grid = QGridLayout(self.safe_container)
+        self.safe_container_layout = QVBoxLayout(self.safe_container)
+        self.safe_container_layout.setSpacing(0)
+
         self.safe_scroll.setWidget(self.safe_container)
         unlock_layout.addWidget(self.safe_scroll)
 
         layout.addWidget(self.unlocked_widget)
 
-        self.current_safe_password = None # Guardará la pass temporalmente mientras esté desbloqueada
+        self.current_safe_password = None
 
     def _unlock_safe(self):
         # Verificar si ya existe contraseña configurada
@@ -5786,50 +5952,150 @@ class VisageVaultApp(QMainWindow):
         self.locked_widget.setVisible(True)
 
     def _load_safe_content(self):
-        # Limpiar grid
-        while self.safe_grid.count():
-            item = self.safe_grid.takeAt(0)
+        while self.safe_container_layout.count() > 0:
+            item = self.safe_container_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
 
         files = self.db.get_safe_files()
         if not files:
-            self.safe_grid.addWidget(QLabel("La caja fuerte está vacía."), 0, 0)
+            lbl = QLabel("La caja fuerte está vacía.")
+            lbl.setAlignment(Qt.AlignCenter)
+            self.safe_container_layout.addWidget(lbl)
             return
 
-        # Cargar elementos
-        cols = max(1, (self.width() - 50) // 150)
-        for i, row in enumerate(files):
-            encrypted_path = row['encrypted_path']
-            original_path = row['original_path']
+        safe_data = {}
+        for row in files:
+            date_str = row['original_date']
+            if not date_str or "-" not in date_str: date_str = "0000-00"
+            year, month = date_str.split("-")
+            if year not in safe_data: safe_data[year] = {}
+            if month not in safe_data[year]: safe_data[year][month] = []
+            safe_data[year][month].append(row)
 
-            # Crear tarjeta
-            card = QFrame()
-            card.setFrameShape(QFrame.StyledPanel)
-            l = QVBoxLayout(card)
-            l.setContentsMargins(5,5,5,5)
+        sorted_years = sorted(safe_data.keys(), reverse=True)
+        thumb_size = self.current_thumbnail_size
 
-            # Miniatura (necesitamos desencriptarla en memoria)
-            # NOTA: Por simplicidad, usaremos un icono de candado/archivo genérico
-            # O intentaríamos desencriptar una miniatura específica si la creamos.
-            # Para esta versión, usaremos un icono seguro.
-            lbl_img = QLabel()
-            lbl_img.setFixedSize(120, 120)
-            lbl_img.setAlignment(Qt.AlignCenter)
-            lbl_img.setStyleSheet("background-color: #333; border-radius: 5px;")
-            if row['media_type'] == 'video':
-                lbl_img.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay).pixmap(64))
-            else:
-                lbl_img.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon).pixmap(64))
+        for year in sorted_years:
+            year_label = QLabel(f"Año {year}")
+            year_label.setStyleSheet("font-size: 16pt; font-weight: bold; margin-top: 20px; margin-bottom: 5px; color: #e74c3c;")
+            self.safe_container_layout.addWidget(year_label)
 
-            l.addWidget(lbl_img)
-            l.addWidget(QLabel(Path(original_path).name))
+            for month in sorted(safe_data[year].keys(), reverse=True):
+                file_rows = safe_data[year][month]
+                try:
+                    month_name = datetime.datetime.strptime(month, "%m").strftime("%B").capitalize()
+                except: month_name = "Desconocido"
 
-            # Menú contextual para restaurar
-            card.setContextMenuPolicy(Qt.CustomContextMenu)
-            card.customContextMenuRequested.connect(lambda pos, p=encrypted_path: self._safe_context_menu(pos, p))
+                month_label = QLabel(month_name)
+                month_label.setStyleSheet("font-size: 14pt; font-weight: bold; margin-top: 10px;")
+                self.safe_container_layout.addWidget(month_label)
 
-            r, c = divmod(i, cols)
-            self.safe_grid.addWidget(card, r, c)
+                list_widget = PreviewListWidget()
+                list_widget.setMovement(QListWidget.Static)
+                list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+                list_widget.setSpacing(20)
+                list_widget.setViewMode(QListWidget.IconMode)
+                list_widget.setResizeMode(QListWidget.Adjust)
+                list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                list_widget.setFrameShape(QFrame.NoFrame)
+                list_widget.setIconSize(QSize(thumb_size, thumb_size))
+
+                list_widget.itemDoubleClicked.connect(self._safe_item_double_clicked)
+                list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+                list_widget.customContextMenuRequested.connect(
+                    lambda pos, lw=list_widget: self._safe_list_context_menu(pos, lw)
+                )
+
+                for row in file_rows:
+                    encrypted_path = row['encrypted_path']
+                    original_name = Path(row['original_path']).name
+                    media_type = row['media_type']
+
+                    if not os.path.exists(encrypted_path): continue
+
+                    item = QListWidgetItem()
+                    item.setToolTip(original_name)
+                    item.setText("")
+                    item.setData(Qt.UserRole, row)
+
+                    pixmap = QPixmap()
+                    loaded = False
+
+                    # --- INTENTO DE CARGA DE IMAGEN (FOTO O THUMBNAIL DE VIDEO) ---
+                    img_bytes = None
+                    try:
+                        if media_type == 'photo':
+                            # Desencriptar la foto en sí
+                            img_bytes = CryptoManager.decrypt_to_bytes(encrypted_path, self.current_safe_password)
+                        elif media_type == 'video':
+                            # Desencriptar el THUMBNAIL asociado (.thumb)
+                            thumb_enc_path = encrypted_path + ".thumb"
+                            if os.path.exists(thumb_enc_path):
+                                img_bytes = CryptoManager.decrypt_to_bytes(thumb_enc_path, self.current_safe_password)
+
+                        if img_bytes:
+                            pixmap.loadFromData(img_bytes)
+                            if not pixmap.isNull():
+                                scaled = pixmap.scaled(thumb_size, thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+                                # Si es vídeo, pintamos el icono de PLAY encima de la foto
+                                if media_type == 'video':
+                                    painter = QPainter(scaled)
+                                    icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
+                                    icon_dim = int(thumb_size * 0.4)
+                                    x = (scaled.width() - icon_dim) // 2
+                                    y = (scaled.height() - icon_dim) // 2
+                                    # Pintar un fondo semitransparente para que se vea el play
+                                    painter.setBrush(QColor(0, 0, 0, 128))
+                                    painter.setPen(Qt.NoPen)
+                                    painter.drawEllipse(x, y, icon_dim, icon_dim)
+                                    icon.paint(painter, x, y, icon_dim, icon_dim)
+                                    painter.end()
+
+                                item.setIcon(QIcon(scaled))
+                                item.setSizeHint(scaled.size())
+                                loaded = True
+                    except: pass
+
+                    # --- FALLBACK (Si no hay thumb o falló) ---
+                    if not loaded:
+                        placeholder = QPixmap(thumb_size, thumb_size)
+                        placeholder.fill(Qt.transparent)
+                        painter = QPainter(placeholder)
+                        painter.setRenderHint(QPainter.Antialiasing)
+
+                        brush = QBrush(QColor("#454545"))
+                        painter.setBrush(brush)
+                        pen = QPen(QColor("#666666"))
+                        pen.setWidth(2)
+                        painter.setPen(pen)
+                        rect_size = thumb_size - 2
+                        painter.drawRoundedRect(1, 1, rect_size, rect_size, 4, 4)
+
+                        icon_type = QStyle.StandardPixmap.SP_MediaPlay if media_type == 'video' else QStyle.StandardPixmap.SP_FileIcon
+                        icon = self.style().standardIcon(icon_type)
+                        icon_dim = int(thumb_size * 0.5)
+                        x = (thumb_size - icon_dim) // 2
+                        y = (thumb_size - icon_dim) // 2
+                        icon.paint(painter, x, y, icon_dim, icon_dim)
+                        painter.end()
+
+                        item.setIcon(QIcon(placeholder))
+                        item.setSizeHint(QSize(thumb_size, thumb_size))
+
+                    list_widget.addItem(item)
+
+                item_full_dim = thumb_size + list_widget.spacing()
+                viewport_width = self.safe_scroll.viewport().width() - 30
+                num_cols = max(1, viewport_width // item_full_dim)
+                rows = (len(file_rows) + num_cols - 1) // num_cols
+                total_height = (rows * item_full_dim) + 30
+                list_widget.setFixedHeight(total_height)
+
+                self.safe_container_layout.addWidget(list_widget)
+
+        self.safe_container_layout.addStretch(1)
 
     def _safe_context_menu(self, pos, encrypted_path):
         menu = QMenu(self)
@@ -5840,6 +6106,7 @@ class VisageVaultApp(QMainWindow):
             self._restore_from_safe(encrypted_path)
 
     def _restore_from_safe(self, encrypted_path):
+        """Restaura un archivo y recupera su fecha personalizada en el sistema."""
         # 1. Buscar info en DB
         cursor = self.db.conn.execute("SELECT * FROM safe_files WHERE encrypted_path = ?", (encrypted_path,))
         row = cursor.fetchone()
@@ -5847,100 +6114,239 @@ class VisageVaultApp(QMainWindow):
 
         original_path = row['original_path']
         media_type = row['media_type']
+        # Recuperamos la fecha que tenía antes de entrar (YYYY-MM)
+        saved_date = row['original_date']
 
         try:
-            # 2. Desencriptar fichero
+            # 2. Desencriptar el archivo principal (Esto crea un archivo con fecha de HOY)
             CryptoManager.process_file(encrypted_path, original_path, self.current_safe_password)
 
-            # 3. Actualizar DBs
+            # 3. Si es vídeo, limpiar también su thumbnail encriptado si existe
             if media_type == 'video':
-                self.db.update_video_date(original_path, row['original_date'][:4], row['original_date'][5:7])
-                # Re-insertar en memoria app... (simplificado: recargar directorio luego)
+                thumb_enc_path = encrypted_path + ".thumb"
+                if os.path.exists(thumb_enc_path):
+                    try: os.remove(thumb_enc_path)
+                    except: pass
+
+            # 4. Restaurar fechas en la BASE DE DATOS
+            year = saved_date[:4]
+            month = saved_date[5:7]
+
+            if media_type == 'video':
+                self.db.update_video_date(original_path, year, month)
             else:
-                self.db.update_photo_date(original_path, row['original_date'][:4], row['original_date'][5:7])
+                self.db.update_photo_date(original_path, year, month)
 
+            # --- 5. CORRECCIÓN CRÍTICA: RESTAURAR FECHA EN EL ARCHIVO FÍSICO ---
+            # Esto obliga al archivo en el disco a tener la fecha antigua, no la de hoy.
+            self._update_file_metadata_on_disk(original_path, year, month)
+            # -------------------------------------------------------------------
+
+            # 6. Limpiar DB y archivo encriptado
             self.db.remove_from_safe(encrypted_path)
-            os.remove(encrypted_path) # Borrar el encriptado
+            if os.path.exists(encrypted_path):
+                os.remove(encrypted_path)
 
+            # 7. Notificar y refrescar
+            from PySide6.QtWidgets import QMessageBox
             QMessageBox.information(self, "Éxito", "Archivo restaurado a su ubicación original.")
-            self._load_safe_content() # Refrescar grid
 
-            # Refrescar galería principal
+            self._load_safe_content()
             self._perform_auto_refresh()
 
         except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Error", f"Error al restaurar: {e}")
+            print(f"Error restaurando: {e}")
 
     def _move_to_safe_box(self, items, is_video):
+        """Prepara y lanza el hilo de encriptación en segundo plano."""
         # 1. Gestionar contraseña
         password = None
         if not config_manager.get_safe_password_hash():
-            # Primera vez: Crear contraseña
             dialog = CreatePasswordDialog(self)
             if dialog.exec() == QDialog.Accepted:
                 password = dialog.password
                 config_manager.set_safe_password_hash(password)
-            else:
-                return # Cancelado
+            else: return
         else:
-            # Pedir contraseña existente
             dialog = LoginDialog(self)
             if dialog.exec() == QDialog.Accepted:
                 password = dialog.password
-            else:
-                return
+            else: return
 
-        # 2. Procesar archivos
-        safe_dir = Path("visagevault_safe")
-        safe_dir.mkdir(exist_ok=True)
-
-        count = 0
+        # 2. Recopilar datos para no pasar widgets al hilo
+        items_data = []
         for item in items:
-            original_path = item.data(Qt.UserRole)
-            if not os.path.exists(original_path): continue
+            path = item.data(Qt.UserRole)
+            if path and os.path.exists(path):
+                items_data.append((path, is_video))
 
-            try:
-                # Definir ruta destino encriptada
-                # Usamos un nombre aleatorio o hash para no revelar el nombre original en disco
-                file_ext = Path(original_path).suffix
-                safe_filename = hashlib.md5(original_path.encode()).hexdigest() + ".enc"
-                encrypted_path = safe_dir / safe_filename
+        if not items_data: return
 
-                # Encriptar
-                CryptoManager.process_file(original_path, encrypted_path, password)
+        self._set_status("Iniciando encriptación en segundo plano...")
 
-                # Guardar info en DB Safe
-                # Obtener fecha para poder restaurar
-                year, month = "0000", "00"
-                if is_video:
-                    year, month = self.db.get_video_date(original_path) or ("0000", "00")
+        # 3. Configurar Worker y Thread
+        self.safe_thread = QThread()
+        self.safe_worker = MoveToSafeWorker(self.db.db_path, items_data, password)
+        self.safe_worker.moveToThread(self.safe_thread)
+
+        # Conectar señales
+        self.safe_thread.started.connect(self.safe_worker.run)
+        self.safe_worker.progress.connect(self._set_status)
+        self.safe_worker.item_finished.connect(self._on_safe_item_processed)
+        self.safe_worker.finished.connect(self._on_safe_worker_finished)
+
+        # Limpieza automática
+        self.safe_worker.finished.connect(self.safe_thread.quit)
+        self.safe_worker.finished.connect(self.safe_worker.deleteLater)
+        self.safe_thread.finished.connect(self.safe_thread.deleteLater)
+
+        self.safe_thread.start()
+
+    @Slot(QListWidgetItem)
+    def _safe_item_double_clicked(self, item):
+        """Abre la foto encriptada en el visor a pantalla completa."""
+        row_data = item.data(Qt.UserRole)
+        encrypted_path = row_data['encrypted_path']
+        media_type = row_data['media_type']
+
+        if media_type == 'video':
+            QMessageBox.information(self, "Info", "La reproducción de vídeo encriptado en memoria aún no está soportada. Restáuralo para verlo.")
+            return
+
+        self._set_status("Desencriptando para visualización...")
+        try:
+            img_bytes = CryptoManager.decrypt_to_bytes(encrypted_path, self.current_safe_password)
+            if img_bytes:
+                pixmap = QPixmap()
+                pixmap.loadFromData(img_bytes)
+                if not pixmap.isNull():
+                    # Usamos tu visor existente
+                    preview = ImagePreviewDialog(pixmap, self)
+                    preview.show_with_animation()
+                    self._set_status("Visualizando archivo seguro.")
                 else:
-                    year, month = self.db.get_photo_date(original_path) or ("0000", "00")
+                    self._set_status("Error: Imagen corrupta o formato no soportado.")
+        except Exception as e:
+            print(f"Error visualización safe: {e}")
 
-                date_str = f"{year}-{month}"
-                media_type = 'video' if is_video else 'photo'
+    def _safe_list_context_menu(self, pos, list_widget):
+        """Menú contextual para la lista de la caja fuerte."""
+        item = list_widget.itemAt(pos)
+        if not item: return
 
-                self.db.add_to_safe(str(original_path), str(encrypted_path), media_type, date_str)
+        menu = QMenu(self)
+        action_restore = menu.addAction("Restaurar a Galería")
+        action_restore.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
 
-                # Borrar original y de DB principal
-                if is_video:
-                    self.db.delete_video_permanently(original_path)
-                else:
-                    self.db.delete_photo_permanently(original_path)
+        action = menu.exec(list_widget.mapToGlobal(pos))
 
-                os.remove(original_path)
+        if action == action_restore:
+            # Obtenemos los seleccionados
+            selected_items = list_widget.selectedItems()
+            count = 0
+            for sel in selected_items:
+                data = sel.data(Qt.UserRole)
+                self._restore_from_safe(data['encrypted_path']) # Reutilizamos tu función de restaurar
                 count += 1
 
-            except Exception as e:
-                print(f"Error moviendo a caja fuerte {original_path}: {e}")
+            if count > 0:
+                self._load_safe_content() # Recargar UI
+                # También refrescamos la galería principal por si acaso
+                self._perform_auto_refresh()
 
-        QMessageBox.information(self, "Caja Fuerte", f"{count} archivos movidos y encriptados.")
+    def _restore_from_safe(self, encrypted_path):
+        """Restaura un archivo y recupera su fecha personalizada en la BD y el sistema."""
+        # 1. Buscar info en DB
+        cursor = self.db.conn.execute("SELECT * FROM safe_files WHERE encrypted_path = ?", (encrypted_path,))
+        row = cursor.fetchone()
+        if not row: return
 
-        # Refrescar vista actual
-        if is_video:
-            self._display_videos()
+        original_path = row['original_path']
+        media_type = row['media_type']
+        # Recuperamos la fecha guardada (YYYY-MM)
+        saved_date = row['original_date']
+
+        # Separar año y mes
+        if saved_date and "-" in saved_date:
+            year = saved_date.split("-")[0]
+            month = saved_date.split("-")[1]
         else:
+            year, month = "0000", "00"
+
+        try:
+            # 2. Desencriptar el archivo principal
+            CryptoManager.process_file(encrypted_path, original_path, self.current_safe_password)
+
+            # 3. Limpiar thumbnail encriptado si existe (para vídeos)
+            if media_type == 'video':
+                thumb_enc_path = encrypted_path + ".thumb"
+                if os.path.exists(thumb_enc_path):
+                    try: os.remove(thumb_enc_path)
+                    except: pass
+
+            # --- 4. CORRECCIÓN: INSERTAR EN LA BASE DE DATOS (NO ACTUALIZAR) ---
+            # Como la foto se borró al entrar, ahora debemos CREARLA de nuevo con la fecha correcta.
+            with self.db.conn:
+                if media_type == 'video':
+                    self.db.conn.execute("""
+                        INSERT OR REPLACE INTO videos (filepath, year, month, is_hidden)
+                        VALUES (?, ?, ?, 0)
+                    """, (original_path, year, month))
+                else:
+                    # Insertamos y ponemos scanned_for_faces=0 para que vuelva a buscar caras
+                    self.db.conn.execute("""
+                        INSERT OR REPLACE INTO photos (filepath, year, month, scanned_for_faces, is_hidden)
+                        VALUES (?, ?, ?, 0, 0)
+                    """, (original_path, year, month))
+            # -------------------------------------------------------------------
+
+            # 5. Restaurar fecha física del archivo (para que coincida)
+            self._update_file_metadata_on_disk(original_path, year, month)
+
+            # 6. Limpiar DB Safe y archivo encriptado
+            self.db.remove_from_safe(encrypted_path)
+            if os.path.exists(encrypted_path):
+                os.remove(encrypted_path)
+
+            # 7. Notificar y refrescar
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Éxito", "Archivo restaurado a su ubicación original.")
+
+            self._load_safe_content()
+            self._perform_auto_refresh()
+
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Error", f"Error al restaurar: {e}")
+            print(f"Error restaurando: {e}")
+
+    @Slot(str, bool)
+    def _on_safe_item_processed(self, original_path, is_video):
+        """Se llama cada vez que el worker termina con un archivo."""
+        # Eliminamos el elemento de la memoria de la aplicación
+        if is_video:
+            self._remove_from_memory_struct(original_path, self.videos_by_year_month)
+        else:
+            self._remove_from_memory_struct(original_path, self.photos_by_year_month)
+
+    @Slot()
+    def _on_safe_worker_finished(self):
+        """Se llama cuando todos los archivos se han movido."""
+        self._set_status("Proceso de caja fuerte finalizado.")
+
+        # Refrescar las vistas
+        if self.videos_by_year_month:
+            self._display_videos()
+        if self.photos_by_year_month:
             self._display_photos()
+
+        # Si la caja fuerte está abierta, refrescarla también para ver los nuevos items
+        if hasattr(self, 'unlocked_widget') and self.unlocked_widget.isVisible():
+            self._load_safe_content()
+
+        QMessageBox.information(self, "Completado", "Los archivos se han movido a la caja fuerte correctamente.")
 
 def run_visagevault():
     """Función para iniciar la aplicación gráfica."""
