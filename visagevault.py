@@ -1144,14 +1144,13 @@ class ZoomableClickableLabel(QLabel):
 # =================================================================
 class PreviewListWidget(QListWidget):
     """
-    QListWidget personalizado que auto-ajusta su altura para evitar huecos negros.
+    QListWidget que auto-ajusta su altura basándose en el contenido real.
     """
     previewRequested = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Optimizaciones de rendimiento de renderizado
-        self.setUniformItemSizes(True)
+        self.setUniformItemSizes(False) # Clave para que la selección se ajuste
         self.setResizeMode(QListWidget.Adjust)
         self.setViewMode(QListWidget.IconMode)
 
@@ -1170,7 +1169,6 @@ class PreviewListWidget(QListWidget):
         if event.key() == Qt.Key_Escape:
             from PySide6.QtWidgets import QApplication
             for widget in QApplication.allWidgets():
-                # Comprobamos por nombre de clase para evitar import circular
                 if widget.__class__.__name__ == "ImagePreviewDialog" and widget.isVisible():
                     if hasattr(widget, 'close_with_animation'):
                         widget.close_with_animation()
@@ -1181,6 +1179,7 @@ class PreviewListWidget(QListWidget):
         super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
+        # Selección con Shift
         if event.button() == Qt.LeftButton and (event.modifiers() & Qt.ShiftModifier):
             item_clicked = self.itemAt(event.position().toPoint())
             current_anchor = self.currentItem()
@@ -1197,41 +1196,29 @@ class PreviewListWidget(QListWidget):
                 return
         super().mousePressEvent(event)
 
-    # --- MÉTODO MÁGICO NUEVO: Auto-ajuste de altura ---
     def resizeEvent(self, event):
-        """
-        Cada vez que cambia el ancho (ej. abrir panel lateral),
-        recalculamos la altura exacta para eliminar huecos negros.
-        """
+        """Al redimensionar la ventana, recalculamos la altura."""
         super().resizeEvent(event)
+        self.adjust_height_to_content()
 
-        # Necesitamos saber el tamaño de la celda (configurado con setGridSize)
-        grid_size = self.gridSize()
-        if grid_size.isEmpty(): return
-
+    def adjust_height_to_content(self):
+        """Calcula la altura exacta basándose en la posición del último ítem."""
         count = self.count()
         if count == 0: return
 
-        # Ancho disponible dentro del widget
-        width = self.viewport().width()
-        if width <= 0: return
+        # Forzar el cálculo de posición de los ítems
+        self.doItemsLayout()
 
-        # Cálculos matemáticos
-        cell_w = grid_size.width()
-        cell_h = grid_size.height()
+        # Obtener el rectángulo visual del ÚLTIMO ítem
+        last_item_rect = self.visualItemRect(self.item(count - 1))
 
-        # Cuántas columnas caben realmente ahora
-        cols = max(1, width // cell_w)
+        if last_item_rect.isValid():
+            # La altura necesaria es el fondo del último ítem + margen
+            new_height = last_item_rect.bottom() + self.spacing() + 10
 
-        # Cuántas filas necesito
-        rows = (count + cols - 1) // cols
-
-        # Altura ideal + pequeño margen
-        new_height = (rows * cell_h) + 10
-
-        # Aplicar solo si ha cambiado para evitar bucles infinitos
-        if self.height() != new_height:
-            self.setFixedHeight(new_height)
+            # Solo aplicamos si hay cambio para evitar bucles
+            if self.height() != new_height and new_height > 0:
+                self.setFixedHeight(new_height)
 
 # =================================================================
 # CLASE PARA VISTA PREVIA CON ZOOM (ImagePreviewDialog)
@@ -6065,8 +6052,8 @@ class VisageVaultApp(QMainWindow):
 
         self._set_status(f"Listo. {self.cloud_photo_count} fotos disponibles.")
 
-    def _display_cloud_photos(self):
-        """Dibuja la interfaz de Nube (Corregida: Sin GridSize, Cálculo altura exacto)."""
+    def def _display_cloud_photos(self):
+        """Dibuja la interfaz de Nube (Usa ajuste de altura automático)."""
 
         while self.cloud_container_layout.count() > 0:
             item = self.cloud_container_layout.takeAt(0)
@@ -6106,18 +6093,12 @@ class VisageVaultApp(QMainWindow):
                 list_widget = PreviewListWidget()
                 list_widget.setMovement(QListWidget.Static)
                 list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
-
-                # ¡CRUCIAL! Esto permite que el SizeHint mande sobre el tamaño de la celda
                 list_widget.setUniformItemSizes(False)
-
                 list_widget.setViewMode(QListWidget.IconMode)
                 list_widget.setResizeMode(QListWidget.Adjust)
-                list_widget.setSpacing(10) # Mismo espaciado que en fotos
+                list_widget.setSpacing(10)
 
-                list_widget.itemPressed.connect(self._handle_global_selection)
-
-                # ¡CRUCIAL! Desactivar uniformidad
-                list_widget.setUniformItemSizes(False)
+                list_widget.itemPressed.connect(self._handle_global_selection) # Corrección selección
 
                 list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                 list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -6129,11 +6110,8 @@ class VisageVaultApp(QMainWindow):
                 list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
                 list_widget.previewRequested.connect(self._on_drive_preview_requested)
 
-                # Tamaño de iconos
                 thumb_size = self.current_thumbnail_size
                 list_widget.setIconSize(QSize(thumb_size, thumb_size))
-
-                # Tamaño de celda (Icono + 10px)
                 item_w = thumb_size + 10
                 item_h = thumb_size + 10
 
@@ -6150,23 +6128,17 @@ class VisageVaultApp(QMainWindow):
                     item.setData(Qt.UserRole, safe_data)
                     item.setData(Qt.UserRole + 1, "not_loaded")
                     item.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
-
-                    # SizeHint para asegurar la caja de selección correcta
                     item.setSizeHint(QSize(item_w, item_h))
                     list_widget.addItem(item)
 
-                # --- CÁLCULO DE ALTURA EXACTO ---
-                viewport_width = self.cloud_scroll_area.viewport().width() - 30
-                if viewport_width < 100: viewport_width = 800
+                # --- ALTURA INICIAL APROXIMADA ---
+                rows = (len(photos) // 5) + 1
+                initial_height = rows * (item_h + 10)
+                list_widget.setFixedHeight(initial_height)
 
-                effective_item_width = item_w + list_widget.spacing()
-                num_cols = max(1, viewport_width // effective_item_width)
-                rows = (len(photos) + num_cols - 1) // num_cols
+                # --- AUTOCORRECCIÓN DE ALTURA ---
+                QTimer.singleShot(10, list_widget.adjust_height_to_content)
 
-                # Fórmula ajustada para eliminar huecos
-                total_height = (rows * item_h) + ((rows + 1) * list_widget.spacing())
-
-                list_widget.setFixedHeight(total_height)
                 widgets_to_add_for_year.append(list_widget)
 
             for w in widgets_to_add_for_year:
@@ -6176,9 +6148,9 @@ class VisageVaultApp(QMainWindow):
 
         self.cloud_container_layout.addStretch(1)
 
-        # Ajuste forzado del layout
+        # Ajuste extra por si el layout tarda en pintarse
         if self.cloud_scroll_area.widget():
-            self.cloud_scroll_area.widget().adjustSize()
+             self.cloud_scroll_area.widget().adjustSize()
 
         QTimer.singleShot(50, self._load_visible_cloud_thumbnails)
         QTimer.singleShot(300, self._load_visible_cloud_thumbnails)
