@@ -144,9 +144,9 @@ Selecciona uno o varios elementos y haz clic derecho para acceder a las opciones
 
 | Acción | Comando |
 | :--- | :--- |
-| **Zoom Miniaturas** | `Ctrl` + `Rueda Ratón` (o `Ctrl` + `+`/`-`) |
-| **Vista Previa Grande** | **Doble Clic** (o `Ctrl` + `Rueda Abajo`) |
-| **Cerrar Vista Previa** | Tecla `ESC` (o `Ctrl` + `Rueda Arriba`) |
+| **Zoom Miniaturas** | `Ctrl` + `+`/`-` |
+| **Vista Previa Grande** | **Doble Clic** |
+| **Cerrar Vista Previa** | Tecla `ESC`  |
 | **Selección Múltiple** | `Ctrl` + `Clic` |
 | **Selección de Rango** | `Shift` + `Clic` |
 | **Selección por Arrastre** | Clic izquierdo y arrastrar sobre el fondo gris |

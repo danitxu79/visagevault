@@ -3363,7 +3363,7 @@ class VisageVaultApp(QMainWindow):
     # ----------------------------------------------------
 
     def _display_photos(self):
-        """Muestra las FOTOS agrupadas por fecha (FILTRANDO LAS OCULTAS)."""
+        """Muestra las FOTOS (Lógica clonada de Vídeos para corregir selección y huecos)."""
         while self.photo_container_layout.count() > 0:
             item = self.photo_container_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -3372,12 +3372,8 @@ class VisageVaultApp(QMainWindow):
         self.photo_list_widget_items.clear()
         self.photo_group_widgets = {}
 
-        # --- PASO 1: OBTENER LISTA NEGRA DE FOTOS OCULTAS ---
-        # Usamos un set() para que la búsqueda sea instantánea
+        # 1. Preparar lista de ocultos
         hidden_paths = set(self.db.get_hidden_photos())
-        # ----------------------------------------------------
-
-        # Sección Ocultas en el árbol
         hidden_item = QTreeWidgetItem(self.date_tree_widget, ["Ocultas"])
         hidden_item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning))
         hidden_item.setData(0, Qt.UserRole, "HIDDEN_SECTION")
@@ -3386,54 +3382,32 @@ class VisageVaultApp(QMainWindow):
 
         for year in sorted_years:
             if year == "Sin Fecha": continue
-
-            # Creamos el item del año, pero no lo expandimos todavía
             year_item = QTreeWidgetItem(self.date_tree_widget, [str(year)])
 
-            # Etiqueta del Año (La creamos, pero si luego el año está vacío, la ocultaremos)
-            # *Nota: Para simplificar, la añadimos. Si queda vacía no es grave,
-            # pero lo ideal es filtrar antes.*
             year_label = QLabel(f"Año {year}")
             year_label.setStyleSheet("font-size: 16pt; font-weight: bold; margin-top: 20px; margin-bottom: 5px;")
-
-            # Guardamos referencia temporalmente
-            widgets_added_for_year = []
-            widgets_added_for_year.append(year_label)
-
-            sorted_months = sorted(self.photos_by_year_month[year].keys())
+            widgets_added_for_year = [year_label]
 
             month_added_count = 0
+            sorted_months = sorted(self.photos_by_year_month[year].keys())
 
             for month in sorted_months:
                 if month == "00": continue
                 all_photos = self.photos_by_year_month[year][month]
 
-                # --- PASO 2: FILTRAR FOTOS VISIBLES ---
-                # Modificado para incluir filtro de carpeta
+                # Filtrar
                 visible_photos = []
                 for p in all_photos:
                     if p in hidden_paths: continue
-
-                    # Filtro de carpeta (Si está activo)
-                    if self.current_photo_filter_path:
-                        # startswith funciona, pero os.path.commonpath es más seguro para rutas
-                        # Simple: comprobar si el path empieza por la carpeta filtro
-                        if not p.startswith(self.current_photo_filter_path):
-                            continue
-
+                    if self.current_photo_filter_path and not p.startswith(self.current_photo_filter_path):
+                        continue
                     visible_photos.append(p)
 
-                # Si no hay fotos visibles en este mes, saltamos al siguiente
-                if not visible_photos:
-                    continue
-                # --------------------------------------
-
+                if not visible_photos: continue
                 month_added_count += 1
 
-                try:
-                    month_name = datetime.datetime.strptime(month, "%m").strftime("%B").capitalize()
-                except ValueError:
-                    month_name = "Mes Desconocido"
+                try: month_name = datetime.datetime.strptime(month, "%m").strftime("%B").capitalize()
+                except: month_name = "Mes Desconocido"
 
                 month_item = QTreeWidgetItem(year_item, [f"{month_name} ({len(visible_photos)})"])
                 month_item.setData(0, Qt.UserRole, (year, month))
@@ -3441,66 +3415,83 @@ class VisageVaultApp(QMainWindow):
                 month_label = QLabel(month_name)
                 month_label.setStyleSheet("font-size: 14pt; font-weight: bold; margin-top: 10px;")
                 widgets_added_for_year.append(month_label)
-
                 self.photo_group_widgets[f"{year}-{month}"] = month_label
 
+                # --- CONFIGURACIÓN LISTWIDGET EXACTA A VÍDEO ---
                 list_widget = PreviewListWidget()
                 list_widget.setMovement(QListWidget.Static)
                 list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
-                list_widget.setSpacing(20)
+
+                # ¡CRUCIAL! Desactivar uniformidad para que la selección se ajuste al tamaño real
+                list_widget.setUniformItemSizes(False)
+
+                # Configuración de vista
+                list_widget.setViewMode(QListWidget.IconMode)
+                list_widget.setResizeMode(QListWidget.Adjust)
+                list_widget.setSpacing(10) # Espacio entre fotos (ajustado para que no haya huecos grandes)
+
+                list_widget.itemPressed.connect(self._handle_global_selection)
+
+                # ¡CRUCIAL! Desactivar uniformidad
+                list_widget.setUniformItemSizes(False)
 
                 list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
                 list_widget.customContextMenuRequested.connect(
                     lambda pos, lw=list_widget: self._on_context_menu(pos, lw, is_video=False)
                 )
-
                 list_widget.previewRequested.connect(self._open_preview_dialog)
                 list_widget.itemDoubleClicked.connect(self._on_photo_item_double_clicked)
-                list_widget.setViewMode(QListWidget.IconMode)
-                list_widget.setResizeMode(QListWidget.Adjust)
+
                 list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                 list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                 list_widget.setFrameShape(QFrame.NoFrame)
-                list_widget.setIconSize(QSize(self.current_thumbnail_size, self.current_thumbnail_size))
 
-                item_w = self.current_thumbnail_size + 8
-                item_h = self.current_thumbnail_size + 8
+                # Tamaño de iconos
+                thumb_size = self.current_thumbnail_size
+                list_widget.setIconSize(QSize(thumb_size, thumb_size))
 
-                # --- USAMOS LA LISTA FILTRADA (visible_photos) ---
+                # Definimos el tamaño exacto que ocupará cada item (Icono + un pequeño borde)
+                item_w = thumb_size + 10
+                item_h = thumb_size + 10
+
                 for photo_path in visible_photos:
                     item = QListWidgetItem("Cargando...")
                     item.setToolTip(Path(photo_path).name)
+                    # ¡CRUCIAL! Forzar el tamaño de la celda para que la selección sea correcta
                     item.setSizeHint(QSize(item_w, item_h))
                     item.setData(Qt.UserRole, photo_path)
                     item.setData(Qt.UserRole + 1, "not_loaded")
                     list_widget.addItem(item)
                     self.photo_list_widget_items[photo_path] = item
 
-                # Calcular altura
+                # --- CÁLCULO DE ALTURA PARA ELIMINAR EL "GAP" ---
+                # Usamos el ancho disponible menos un margen de seguridad
                 viewport_width = self.scroll_area.viewport().width() - 30
-                thumb_width = item_w + list_widget.spacing()
-                num_cols = max(1, viewport_width // thumb_width)
-                rows = (len(visible_photos) + num_cols - 1) // num_cols
-                total_height = (rows * item_h) + (rows * list_widget.spacing())
-                list_widget.setFixedHeight(total_height)
+                if viewport_width < 100: viewport_width = 800
 
+                # Ancho real de cada celda incluyendo el spacing del widget
+                effective_item_width = item_w + list_widget.spacing()
+
+                # Calcular columnas
+                num_cols = max(1, viewport_width // effective_item_width)
+
+                # Calcular filas
+                rows = (len(visible_photos) + num_cols - 1) // num_cols
+
+                # Altura total = (Filas * AlturaItem) + (Filas * Espacio) + Margen extra pequeño
+                total_height = (rows * item_h) + ((rows + 1) * list_widget.spacing())
+
+                list_widget.setFixedHeight(total_height)
                 widgets_added_for_year.append(list_widget)
 
-            # Solo añadimos los widgets al layout si el año tiene al menos un mes visible
             if month_added_count > 0:
                 self.photo_container_layout.addWidget(year_label)
                 self.photo_group_widgets[year] = year_label
-                # Añadir el resto (meses y listas)
-                # year_label ya estaba en la lista widgets_added_for_year[0], pero no en el layout
                 for i, w in enumerate(widgets_added_for_year):
-                    if i == 0: continue # El label ya lo añadimos arriba
+                    if i == 0: continue
                     self.photo_container_layout.addWidget(w)
-
                 year_item.setExpanded(True)
             else:
-                # Si el año se quedó vacío, quitamos el item del árbol
-                # (Esto ocurre si ocultaste TODAS las fotos de 2024, por ejemplo)
-                # year_item no se añade al padre si lo borramos o lo ocultamos
                 year_item.setHidden(True)
 
         self.photo_container_layout.addStretch(1)
@@ -3580,6 +3571,8 @@ class VisageVaultApp(QMainWindow):
                 list_widget.setMovement(QListWidget.Static)
                 list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
                 list_widget.setSpacing(20)
+
+                list_widget.itemPressed.connect(self._handle_global_selection)
 
                 list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
                 list_widget.customContextMenuRequested.connect(
@@ -6073,9 +6066,8 @@ class VisageVaultApp(QMainWindow):
         self._set_status(f"Listo. {self.cloud_photo_count} fotos disponibles.")
 
     def _display_cloud_photos(self):
-        """Dibuja la interfaz de Nube EXACTAMENTE igual que Fotos (Estilo nativo)."""
+        """Dibuja la interfaz de Nube (Corregida: Sin GridSize, Cálculo altura exacto)."""
 
-        # Limpiar layout anterior
         while self.cloud_container_layout.count() > 0:
             item = self.cloud_container_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -6090,7 +6082,6 @@ class VisageVaultApp(QMainWindow):
 
             year_label = QLabel(f"Año {year}")
             year_label.setStyleSheet("font-size: 16pt; font-weight: bold; margin-top: 20px; margin-bottom: 5px;")
-
             widgets_to_add_for_year = [year_label]
             self.cloud_group_widgets[str(year)] = year_label
 
@@ -6100,10 +6091,8 @@ class VisageVaultApp(QMainWindow):
                 photos = self.drive_photos_by_date[year][month]
                 if not photos: continue
 
-                try:
-                    month_name = datetime.datetime.strptime(month, "%m").strftime("%B").capitalize()
-                except:
-                    month_name = "Desconocido"
+                try: month_name = datetime.datetime.strptime(month, "%m").strftime("%B").capitalize()
+                except: month_name = "Desconocido"
 
                 month_item = QTreeWidgetItem(year_item, [f"{month_name} ({len(photos)})"])
                 month_item.setData(0, Qt.UserRole, f"{year}-{month}")
@@ -6113,36 +6102,41 @@ class VisageVaultApp(QMainWindow):
                 widgets_to_add_for_year.append(month_label)
                 self.cloud_group_widgets[f"{year}-{month}"] = month_label
 
-                # --- LISTA DE FOTOS ---
+                # --- CONFIGURACIÓN LISTWIDGET ---
                 list_widget = PreviewListWidget()
-                # Configuración básica
                 list_widget.setMovement(QListWidget.Static)
                 list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
-                list_widget.setSpacing(10)
+
+                # ¡CRUCIAL! Esto permite que el SizeHint mande sobre el tamaño de la celda
+                list_widget.setUniformItemSizes(False)
+
+                list_widget.setViewMode(QListWidget.IconMode)
+                list_widget.setResizeMode(QListWidget.Adjust)
+                list_widget.setSpacing(10) # Mismo espaciado que en fotos
+
+                list_widget.itemPressed.connect(self._handle_global_selection)
+
+                # ¡CRUCIAL! Desactivar uniformidad
+                list_widget.setUniformItemSizes(False)
+
                 list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                 list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                 list_widget.setFrameShape(QFrame.NoFrame)
 
-                # Conexiones
                 list_widget.customContextMenuRequested.connect(
                     lambda pos, lw=list_widget: self._on_drive_context_menu(pos, lw)
                 )
                 list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
                 list_widget.previewRequested.connect(self._on_drive_preview_requested)
 
-                # --- CONFIGURACIÓN DE TAMAÑO ---
-                icon_size = self.current_thumbnail_size
-                cell_size = icon_size + 10
+                # Tamaño de iconos
+                thumb_size = self.current_thumbnail_size
+                list_widget.setIconSize(QSize(thumb_size, thumb_size))
 
-                list_widget.setIconSize(QSize(icon_size, icon_size))
+                # Tamaño de celda (Icono + 10px)
+                item_w = thumb_size + 10
+                item_h = thumb_size + 10
 
-                # ¡VITAL! Esto es lo que lee el resizeEvent para calcular
-                list_widget.setGridSize(QSize(cell_size, cell_size))
-                # -------------------------------
-
-                item_dim = cell_size
-
-                # Añadir items
                 for f in photos:
                     item = QListWidgetItem("Cargando...")
                     item.setToolTip(f['name'])
@@ -6157,23 +6151,22 @@ class VisageVaultApp(QMainWindow):
                     item.setData(Qt.UserRole + 1, "not_loaded")
                     item.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
 
-                    # Hint inicial (aunque resizeEvent lo corregirá)
-                    item.setSizeHint(QSize(item_dim, item_dim))
-
+                    # SizeHint para asegurar la caja de selección correcta
+                    item.setSizeHint(QSize(item_w, item_h))
                     list_widget.addItem(item)
 
-                # --- ALTURA INICIAL APROXIMADA ---
-                # Le damos una altura inicial para que aparezca,
-                # pero inmediatamente después el resizeEvent la corregirá al milímetro.
-                viewport_width = self.cloud_scroll_area.viewport().width()
+                # --- CÁLCULO DE ALTURA EXACTO ---
+                viewport_width = self.cloud_scroll_area.viewport().width() - 30
                 if viewport_width < 100: viewport_width = 800
 
-                num_cols = max(1, viewport_width // cell_size)
+                effective_item_width = item_w + list_widget.spacing()
+                num_cols = max(1, viewport_width // effective_item_width)
                 rows = (len(photos) + num_cols - 1) // num_cols
-                initial_height = (rows * cell_size) + 10
 
-                list_widget.setFixedHeight(initial_height)
+                # Fórmula ajustada para eliminar huecos
+                total_height = (rows * item_h) + ((rows + 1) * list_widget.spacing())
 
+                list_widget.setFixedHeight(total_height)
                 widgets_to_add_for_year.append(list_widget)
 
             for w in widgets_to_add_for_year:
@@ -6183,16 +6176,11 @@ class VisageVaultApp(QMainWindow):
 
         self.cloud_container_layout.addStretch(1)
 
-        # --- CORRECCIÓN AQUÍ: Forzar actualización visual ---
-
-        # 1. Forzar al layout a calcular posiciones YA
+        # Ajuste forzado del layout
         if self.cloud_scroll_area.widget():
             self.cloud_scroll_area.widget().adjustSize()
 
-        # 2. Llamada en DOS TIEMPOS para asegurar que Qt ha pintado los widgets
-        # Intento inmediato (50ms)
         QTimer.singleShot(50, self._load_visible_cloud_thumbnails)
-        # Intento de seguridad (300ms) por si el layout tardó en pintarse
         QTimer.singleShot(300, self._load_visible_cloud_thumbnails)
 
     @Slot(QTreeWidgetItem, QTreeWidgetItem)
@@ -7163,6 +7151,31 @@ class VisageVaultApp(QMainWindow):
             self._set_status(f"Filtrando vídeos en: {Path(path).name}")
 
         self._display_videos() # Redibujar con filtro
+
+    def _handle_global_selection(self, item):
+        """
+        Limpia la selección de todas las demás listas cuando el usuario hace clic en una.
+        Permite mantener la selección múltiple si se pulsa Ctrl.
+        """
+        sender_list = self.sender()
+        if not sender_list: return
+
+        # Si el usuario pulsa Control, asumimos que quiere seleccionar cosas de varios meses
+        if QApplication.keyboardModifiers() & Qt.ControlModifier:
+            return
+
+        # Buscar el contenedor padre (el widget dentro del ScrollArea)
+        # Esto funciona para Fotos, Vídeos y Nube indistintamente
+        parent_widget = sender_list.parent()
+        if not parent_widget: return
+
+        # Recorrer TODAS las listas hermanas y limpiar su selección
+        for other_list in parent_widget.findChildren(PreviewListWidget):
+            if other_list != sender_list:
+                # Bloqueamos señales para evitar bucles recursivos innecesarios
+                other_list.blockSignals(True)
+                other_list.clearSelection()
+                other_list.blockSignals(False)
 
 def run_visagevault():
     """Función para iniciar la aplicación con Splash Screen corregido (PySide6)."""
