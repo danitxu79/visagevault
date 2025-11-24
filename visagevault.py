@@ -6052,7 +6052,7 @@ class VisageVaultApp(QMainWindow):
 
         self._set_status(f"Listo. {self.cloud_photo_count} fotos disponibles.")
 
-    def def _display_cloud_photos(self):
+    def _display_cloud_photos(self):
         """Dibuja la interfaz de Nube (Usa ajuste de altura automático)."""
 
         while self.cloud_container_layout.count() > 0:
