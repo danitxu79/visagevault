@@ -1,6 +1,6 @@
 # ==============================================================================
 # PROYECTO: VisageVault - Gestor de Fotografías Inteligente
-# VERSIÓN: 1.6.8
+# VERSIÓN: 1.6.9
 # DERECHOS DE AUTOR: © 2025 Daniel Serrano Armenta
 # ==============================================================================
 #
@@ -2687,16 +2687,41 @@ class VisageVaultApp(QMainWindow):
         else:
             print(f"Advertencia: No se pudo encontrar el icono en {icon_path}")
 
+        # --- CORRECCIÓN DE RUTAS (SOPORTE LINUX/AUR) ---
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.root_cache = os.path.join(base_dir, "visagevault_cache")
 
-        # Creamos la estructura si no existe
+        # Detectamos si tenemos permiso para escribir en la carpeta del programa (Modo Portable/Dev)
+        if os.access(base_dir, os.W_OK):
+            # Estamos desarrollando o es un .exe portable
+            self.data_dir = base_dir
+            self.cache_dir = os.path.join(base_dir, "visagevault_cache")
+        else:
+            # Estamos instalados en /usr/share (Modo Sistema/AUR)
+            # Usamos los estándares XDG de Linux
+            user_home = os.path.expanduser("~")
+
+            # Para base de datos y config: ~/.local/share/visagevault
+            self.data_dir = os.path.join(user_home, ".local", "share", "visagevault")
+
+            # Para caché (imágenes): ~/.cache/visagevault
+            self.cache_dir = os.path.join(user_home, ".cache", "visagevault")
+
+        # Crear directorios si no existen
+        os.makedirs(self.data_dir, exist_ok=True)
+        os.makedirs(self.cache_dir, exist_ok=True)
+
+        # Asignar a la variable que usas en el resto del código
+        self.root_cache = self.cache_dir
+
+        # Subcarpetas de caché
         os.makedirs(os.path.join(self.root_cache, "face_cache"), exist_ok=True)
         os.makedirs(os.path.join(self.root_cache, "drive_cache"), exist_ok=True)
         os.makedirs(os.path.join(self.root_cache, "drive_snapshot_cache"), exist_ok=True)
 
-        # Referencia para compatibilidad si se usa self.cache_dir en algún sitio antiguo
-        self.cache_dir = self.root_cache
+        # --- IMPORTANTE: INICIALIZAR DB EN LA RUTA CORRECTA ---
+        # Si no especificamos ruta, intentará crearla en /usr/share y fallará también
+        db_path = os.path.join(self.data_dir, "visagevault.db")
+        self.db = VisageVaultDB(db_path) # Asegúrate que tu clase DB acepte rutas absolutas
 
         self.refresh_timer = QTimer()
         self.refresh_timer.setSingleShot(True)
