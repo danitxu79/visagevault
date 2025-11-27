@@ -1,6 +1,6 @@
 # ==============================================================================
 # PROYECTO: VisageVault - Gestor de Fotografías Inteligente
-# VERSIÓN: 1.6.11
+# VERSIÓN: 1.6.12
 # DERECHOS DE AUTOR: © 2025 Daniel Serrano Armenta
 # ==============================================================================
 #
@@ -3236,16 +3236,25 @@ class VisageVaultApp(QMainWindow):
             self._open_directory_dialog(force_select=True)
 
     def _open_directory_dialog(self, force_select=False):
-        # ... (código existente hasta self.current_directory = directory) ...
+        """Abre el selector de directorios y gestiona la carga."""
+
+        # 1. Definir la variable 'directory' abriendo el diálogo
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Seleccionar Carpeta de Fotos",
+            self.current_directory or ""
+        )
+
         if directory:
             self.current_directory = directory
             config_manager.set_photo_directory(directory)
             self.path_label.setText(f"Ruta: {Path(directory).name}")
 
-            # --- NUEVO: Resetear filtros y recargar árboles si están abiertos ---
+            # Resetear filtros
             self.current_photo_filter_path = None
             self.current_video_filter_path = None
 
+            # Recargar árboles si están visibles
             if self.btn_show_photo_tree.isChecked():
                 self._load_local_tree_root(self.photo_folder_tree, directory)
             else:
@@ -3255,11 +3264,12 @@ class VisageVaultApp(QMainWindow):
                 self._load_local_tree_root(self.video_folder_tree, directory)
             else:
                 self.video_folder_tree.clear()
-            # ------------------------------------------------------------------
 
+            # Limpiar y escanear
             self.date_tree_widget.clear()
             self.video_date_tree_widget.clear()
             self._start_media_scan(directory)
+
         elif force_select:
              self._set_status("¡Debes seleccionar un directorio para comenzar!")
 

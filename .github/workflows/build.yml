@@ -11,7 +11,7 @@ on:
 jobs:
 
   ##########################################
-  # 1) WINDOWS
+  # 1) WINDOWS (EXE)
   ##########################################
   build-windows:
     runs-on: windows-latest
@@ -26,10 +26,16 @@ jobs:
         with:
           python-version: '3.11'
 
+      # --- INYECCIÓN DE SECRETOS (Windows) ---
+      - name: Inject Google Credentials
+        run: |
+          sed -i "s/BUILD_TIME_CLIENT_ID/${{ secrets.GOOGLE_CLIENT_ID }}/g" drive_auth.py
+          sed -i "s/BUILD_TIME_CLIENT_SECRET/${{ secrets.GOOGLE_CLIENT_SECRET }}/g" drive_auth.py
+
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller cmake
+          pip install pyinstaller
 
       - name: Build EXE with PyInstaller
         run: |
@@ -58,7 +64,7 @@ jobs:
           prerelease: false
 
   ##########################################
-  # 2) MACOS
+  # 2) MACOS (DMG)
   ##########################################
   build-macos:
     runs-on: macos-latest
@@ -70,10 +76,16 @@ jobs:
         with:
           python-version: '3.11'
 
+      # --- INYECCIÓN DE SECRETOS (macOS) ---
+      - name: Inject Google Credentials
+        run: |
+          sed -i "s/BUILD_TIME_CLIENT_ID/${{ secrets.GOOGLE_CLIENT_ID }}/g" drive_auth.py
+          sed -i "s/BUILD_TIME_CLIENT_SECRET/${{ secrets.GOOGLE_CLIENT_SECRET }}/g" drive_auth.py
+
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller cmake
+          pip install pyinstaller
           brew install create-dmg
 
       - name: Build macOS App
@@ -116,9 +128,9 @@ jobs:
           prerelease: false
 
   ##########################################
-  # 3) LINUX (AppImage + DEB + RPM + PKG)
+  # 3) LINUX BINARY (AppImage / DEB / RPM)
   ##########################################
-  build-linux:
+  build-linux-bin:
     runs-on: ubuntu-latest
 
     steps:
@@ -127,6 +139,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      # --- INYECCIÓN DE SECRETOS (Linux Binary) ---
+      - name: Inject Google Credentials
+        run: |
+          sed -i "s/BUILD_TIME_CLIENT_ID/${{ secrets.GOOGLE_CLIENT_ID }}/g" drive_auth.py
+          sed -i "s/BUILD_TIME_CLIENT_SECRET/${{ secrets.GOOGLE_CLIENT_SECRET }}/g" drive_auth.py
 
       - name: Install system dependencies
         run: |
@@ -168,16 +186,10 @@ jobs:
           mkdir -p AppDir/usr/bin
           mkdir -p AppDir/usr/share/applications
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
-
-          # COHERENCIA: Copiar carpeta generada con nombre "VisageVault"
           cp -r dist/VisageVault/* AppDir/usr/bin/
-
-          # Asegurar permisos al binario principal "VisageVault"
           chmod +x AppDir/usr/bin/VisageVault
-
           cp visagevault.png AppDir/usr/share/icons/hicolor/256x256/apps/visagevault.png
 
-          # COHERENCIA: El Exec apunta a "VisageVault" (Mayúsculas)
           cat << EOF > AppDir/usr/share/applications/visagevault.desktop
           [Desktop Entry]
           Name=VisageVault
@@ -199,41 +211,69 @@ jobs:
             --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/visagevault.png \
             --output appimage
 
-      - name: Build DEB / RPM / PACMAN
+      - name: Build DEB / RPM
         run: |
           VERSION_TAG=$(echo ${{ github.ref_name }} | sed 's/v//')
 
-          # COHERENCIA: Nombre del paquete "VisageVault"
-
-          # DEB
           fpm -s dir -t deb -n VisageVault -v $VERSION_TAG \
             --architecture amd64 \
             --description "Gestor de Fotos y Videos Inteligente" \
             --maintainer "Daniel Serrano" \
             -C AppDir --prefix "/" .
 
-          # RPM
           fpm -s dir -t rpm -n VisageVault -v $VERSION_TAG \
             --architecture x86_64 \
             --description "Gestor de Fotos y Videos Inteligente" \
             --maintainer "Daniel Serrano" \
             -C AppDir --prefix "/" .
 
-          # PACMAN
-          fpm -s dir -t pacman -n VisageVault -v $VERSION_TAG \
-            --architecture x86_64 \
-            --description "Gestor de Fotos y Videos Inteligente" \
-            --maintainer "Daniel Serrano" \
-            -C AppDir --prefix "/" .
-
-      - name: Upload Linux Assets
+      - name: Upload Linux Binaries
         uses: softprops/action-gh-release@v1
         with:
           files: |
             VisageVault*.AppImage
             *.deb
             *.rpm
-            *.pkg.tar.zst
+          tag_name: ${{ github.ref_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          prerelease: false
+
+  ##########################################
+  # 4) SOURCE TARBALL (Para AUR / Arch Linux)
+  ##########################################
+  build-source-aur:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- INYECCIÓN DE SECRETOS (Source) ---
+      # Esto permite que el usuario de AUR tenga las llaves puestas
+      - name: Inject Google Credentials
+        run: |
+          sed -i "s/BUILD_TIME_CLIENT_ID/${{ secrets.GOOGLE_CLIENT_ID }}/g" drive_auth.py
+          sed -i "s/BUILD_TIME_CLIENT_SECRET/${{ secrets.GOOGLE_CLIENT_SECRET }}/g" drive_auth.py
+
+      - name: Create Source Tarball
+        run: |
+          # Nombre de la carpeta: visagevault-1.6.14 (sin la v)
+          PKG_NAME="visagevault-${{ github.ref_name }}"
+          DIR_NAME=$(echo $PKG_NAME | sed 's/v//')
+
+          mkdir $DIR_NAME
+
+          # Copiar archivos esenciales (incluido drive_auth.py modificado)
+          cp *.py $DIR_NAME/
+          cp visagevault.png $DIR_NAME/
+          # Si tienes requirements o license, cópialos también
+          # cp requirements.txt $DIR_NAME/
+
+          # Comprimir
+          tar -czvf $DIR_NAME.tar.gz $DIR_NAME
+
+      - name: Upload Source Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: visagevault-*.tar.gz
           tag_name: ${{ github.ref_name }}
           token: ${{ secrets.GITHUB_TOKEN }}
           prerelease: false

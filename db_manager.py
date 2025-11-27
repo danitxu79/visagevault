@@ -40,7 +40,6 @@ class VisageVaultDB:
         if not self.is_worker:
             try:
                 self._connect_main_db()
-                self._init_db()
             except Exception as e:
                 print(f"Error inicializando DB: {e}")
 

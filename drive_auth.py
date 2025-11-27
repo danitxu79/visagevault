@@ -1,93 +1,79 @@
-# drive_auth.py
 import os
 import pickle
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
-import sys
-import threading
-
-# Permisos: Solo lectura para ver fotos (más seguro y genera menos desconfianza)
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
 class DriveAuthenticator:
+    SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+
+    # --- MARCADORES DE POSICIÓN (PLACEHOLDERS) ---
+    # GitHub Actions reemplazará esto automáticamente al crear la Release.
+    # NO ESCRIBAS TUS CLAVES REALES AQUÍ.
+    CLIENT_CONFIG = {
+        "installed": {
+            "client_id": "BUILD_TIME_CLIENT_ID",
+            "project_id": "visagevault",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_secret": "BUILD_TIME_CLIENT_SECRET",
+            "redirect_uris": ["http://localhost"]
+        }
+    }
+    # ---------------------------------------------------------
+
     def __init__(self):
         self.creds = None
-        self.token_path = os.path.join(os.path.dirname(__file__), 'user_token.pickle')
-        self.secrets_path = resource_path('client_secrets.json')
+        self.token_file = self._get_token_path()
 
-    def has_credentials(self):
-        """Verifica si existe el archivo de token."""
-        return os.path.exists(self.token_path)
-
-    def logout(self):
-        """Cierra sesión borrando el token local."""
-        self.creds = None
-        if os.path.exists(self.token_path):
-            try:
-                os.remove(self.token_path)
-                return True
-            except Exception as e:
-                print(f"Error borrando token: {e}")
-                return False
-        return True
+    def _get_token_path(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        filename = "token.json"
+        # Si no podemos escribir aquí (instalación en /usr/share), vamos a ~/.local
+        if not os.access(base_dir, os.W_OK):
+            user_dir = os.path.join(os.path.expanduser("~"), ".local", "share", "visagevault")
+            os.makedirs(user_dir, exist_ok=True)
+            return os.path.join(user_dir, filename)
+        return os.path.join(base_dir, filename)
 
     def get_service(self, silent=False):
-        """
-        Obtiene el servicio de Drive.
-        Si silent=True, NO abrirá el navegador si el token es inválido,
-        simplemente devolverá None.
-        """
-        # 1. Cargar sesión guardada
-        if os.path.exists(self.token_path):
+        if os.path.exists(self.token_file):
             try:
-                with open(self.token_path, 'rb') as token:
+                with open(self.token_file, 'rb') as token:
                     self.creds = pickle.load(token)
-            except Exception:
-                self.creds = None
+            except Exception: pass
 
-        # 2. Validar credenciales
         if not self.creds or not self.creds.valid:
             if self.creds and self.creds.expired and self.creds.refresh_token:
                 try:
                     self.creds.refresh(Request())
                 except Exception:
-                    self.creds = None
+                    if silent: return None
+                    self._perform_login()
             else:
-                self.creds = None
+                if silent: return None
+                self._perform_login()
 
-        # 3. Si no hay credenciales válidas:
-        if not self.creds:
-            if silent:
-                # Si es modo silencioso (arranque), no hacemos nada más
-                return None
-            else:
-                # Si NO es silencioso (botón conectar), abrimos navegador
-                self._start_browser_login()
-
-        # Guardar token refrescado o nuevo
-        if self.creds and self.creds.valid:
-            with open(self.token_path, 'wb') as token:
+            # Guardar sesión
+            with open(self.token_file, 'wb') as token:
                 pickle.dump(self.creds, token)
-            return build('drive', 'v3', credentials=self.creds)
 
-        return None
+        return build('drive', 'v3', credentials=self.creds)
 
-    def _start_browser_login(self):
-        if not os.path.exists(self.secrets_path):
-            raise FileNotFoundError("Falta client_secrets.json")
+    def _perform_login(self):
+        # Comprobación de seguridad por si olvidamos inyectar las claves
+        if "BUILD_TIME" in self.CLIENT_CONFIG["installed"]["client_id"]:
+            raise ValueError("Error: Las credenciales de Google no se inyectaron durante la compilación.")
 
-        flow = InstalledAppFlow.from_client_secrets_file(self.secrets_path, SCOPES)
-        self.creds = flow.run_local_server(
-            port=0,
-            success_message='Autenticación completada. Puedes cerrar esta ventana.'
-        )
+        flow = InstalledAppFlow.from_client_config(self.CLIENT_CONFIG, self.SCOPES)
+        self.creds = flow.run_local_server(port=0)
 
+    def has_credentials(self):
+        return os.path.exists(self.token_file)
 
-# --- FUNCIÓN AUXILIAR (Necesaria para encontrar client_secrets.json en el .exe) ---
-def resource_path(relative_path):
-    if hasattr(sys, '_MEIPASS'):
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_path, relative_path)
+    def logout(self):
+        if os.path.exists(self.token_file):
+            os.remove(self.token_file)
+            return True
+        return False
