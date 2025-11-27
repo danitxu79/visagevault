@@ -1,3 +1,9 @@
+<a href="https://github.com/danitxu79/SentinelX">
+    <img src="https://raw.githubusercontent.com/danitxu79/SentinelX/main/AnabasaSoft.png" width="600" alt="AnabasaSoft Logo">
+  </a>
+
+  <br><br>
+
 <p align="center">
   <img src="https://github.com/danitxu79/visagevault/raw/master/visagevault.png" alt="Logo de VisageVault">
 </p>
