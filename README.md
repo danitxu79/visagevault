@@ -1,11 +1,11 @@
 <p align="center">
-    <img src="https://raw.githubusercontent.com/danitxu79/visagevault/master/AnabasaSoft.png" width="600" alt="AnabasaSoft Logo">
+    <img src="https://raw.githubusercontent.com/anabasasoft/visagevault/master/AnabasaSoft.png" width="600" alt="AnabasaSoft Logo">
   </p>
 
   <br><br>
 
 <p align="center">
-  <img src="https://github.com/danitxu79/visagevault/raw/master/visagevault.png" alt="Logo de VisageVault">
+  <img src="https://github.com/anabasasoft/visagevault/raw/master/visagevault.png" alt="Logo de VisageVault">
 </p>
 
 # 📸 VisageVault
@@ -102,7 +102,7 @@ Asegúrate de que tu `requirements.txt` esté actualizado. Las dependencias clav
 1.  **Clonar el repositorio:**
 
     ```bash
-    git clone https://github.com/danitxu79/visagevault.git
+    git clone https://github.com/anabasasoft/visagevault.git
     cd visagevault
     ```
 
@@ -156,3 +156,19 @@ Selecciona uno o varios elementos y haz clic derecho para acceder a las opciones
 | **Selección Múltiple** | `Ctrl` + `Clic` |
 | **Selección de Rango** | `Shift` + `Clic` |
 | **Selección por Arrastre** | Clic izquierdo y arrastrar sobre el fondo gris |
+
+---
+
+## 📬 Contacto y Autor
+
+Este proyecto ha sido desarrollado con ❤️ y mucho café por:
+
+**Daniel Serrano Armenta (AnabasaSoft)**
+
+* 📧 **Email:** [anabasasoft@gmail.com](mailto:anabasasoft@gmail.com)
+* 🐙 **GitHub:** [github.com/danitxu79](https://github.com/danitxu79/)
+* 🌐 **Portafolio:** [danitxu79.github.io](https://danitxu79.github.io/)
+
+---
+
+*Si encuentras útil este proyecto, ¡no olvides darle una ⭐ en GitHub!*

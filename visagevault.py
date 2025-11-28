@@ -1,12 +1,12 @@
 # ==============================================================================
 # PROYECTO: VisageVault - Gestor de Fotografías Inteligente
-# VERSIÓN: 1.6.15
+# VERSIÓN: 1.6.16
 # DERECHOS DE AUTOR: © 2025 Daniel Serrano Armenta
 # ==============================================================================
 #
 # Autor: Daniel Serrano Armenta
-# Contacto: dani.eus79@gmail.com
-# GitHub: github.com/danitxu79
+# Contacto: anabasasoft@gmail.com
+# GitHub: github.com/anabasasoft
 # Portafolio: https://danitxu79.github.io/
 #
 # ## 📜 Licencia
@@ -2071,10 +2071,10 @@ class HelpDialog(QDialog):
         <p>Desarrollado por <b>Daniel Serrano Armenta</b>.</p>
 
         <p>🐙 <b>GitHub:</b><br>
-        <a href="https://github.com/danitxu79/VisageVault">github.com/danitxu79/VisageVault</a></p>
+        <a href="https://github.com/AnabasaSoft/VisageVault">github.com/AnabasaSoft/VisageVault</a></p>
 
         <p>📧 <b>Email:</b><br>
-        <a href="mailto:dani.eus79@gmail.com">dani.eus79@gmail.com</a></p>
+        <a href="mailto:anabasasoft@gmail.com">anabasasoft@gmail.com</a></p>
         """
 
         info_label = QLabel(help_text)
